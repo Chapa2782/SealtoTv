@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xuper TV - Panel de Administración</title>
+    <link rel="stylesheet" href="/static/style.css?v=5">
+    <style>
+        html, body {
+            overflow: auto;
+            height: auto;
+            background: #000;
+            color: #fff;
+        }
+        .admin-container {
+            max-width: 800px;
+            margin: 36px auto;
+            background: #111;
+            border: 1px solid #222;
+            padding: 28px;
+            border-radius: 12px;
+            font-family: 'Segoe UI', sans-serif;
+        }
+        .admin-container h1 {
+            color: #3b82f6;
+            margin-bottom: 18px;
+            font-size: 1.45rem;
+        }
+        .admin-section {
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #222;
+        }
+        .admin-section:last-of-type {
+            border-bottom: none;
+        }
+        .admin-section label,
+        .admin-section .section-title {
+            display: block;
+            margin-bottom: 8px;
+            color: #9ca3af;
+            font-size: 0.9rem;
+        }
+        .admin-section input[type="text"],
+        .admin-section select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #050505;
+            border: 1px solid #333;
+            color: #fff;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            outline: none;
+        }
+        .admin-section input:focus,
+        .admin-section select:focus {
+            border-color: #3b82f6;
+        }
+        .btn-action {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .btn-action:hover:not(:disabled) {
+            background: #2563eb;
+        }
+        .btn-action:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+        .btn-action:focus-visible,
+        .btn-del-item:focus-visible {
+            outline: 2px solid #93c5fd;
+            outline-offset: 2px;
+        }
+        .btn-neutral {
+            background: #1f2937;
+            border: 1px solid #374151;
+        }
+        .btn-neutral:hover:not(:disabled) {
+            background: #374151;
+        }
+        .btn-danger {
+            background: #ef4444;
+        }
+        .btn-danger:hover:not(:disabled) {
+            background: #dc2626;
+        }
+        .btn-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 4px;
+        }
+        .btn-del-item {
+            background: transparent;
+            border: 1px solid #ef4444;
+            color: #f87171;
+            padding: 5px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .btn-del-item:hover {
+            background: #ef4444;
+            color: #fff;
+        }
+
+        /* Mensajes en pantalla (reemplazan a alert) */
+        #admin-msg {
+            display: none;
+            margin-bottom: 18px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 0.88rem;
+        }
+        #admin-msg.ok { display: block; background: #052e1a; border: 1px solid #166534; color: #86efac; }
+        #admin-msg.error { display: block; background: #2a0a0a; border: 1px solid #991b1b; color: #fca5a5; }
+        #admin-msg.info { display: block; background: #0c1a33; border: 1px solid #1e3a8a; color: #93c5fd; }
+
+        /* Estadísticas */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+        .stat-box {
+            background: #080808;
+            border: 1px solid #222;
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .stat-box .num {
+            font-size: 1.4rem;
+            font-weight: 700;
+        }
+        .stat-box .lbl {
+            font-size: 0.78rem;
+            color: #9ca3af;
+            margin-top: 2px;
+        }
+        .num-ok { color: #22c55e; }
+        .num-caido { color: #ef4444; }
+        .num-desc { color: #9ca3af; }
+
+        /* Progreso de verificación */
+        .progress-wrap {
+            display: none;
+            margin-top: 14px;
+        }
+        .progress-wrap.visible {
+            display: block;
+        }
+        .progress-bar {
+            height: 8px;
+            background: #1f2937;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0;
+            background: #3b82f6;
+            transition: width 0.4s ease;
+        }
+        .progress-text {
+            margin-top: 8px;
+            font-size: 0.82rem;
+            color: #9ca3af;
+        }
+
+        .filters-row {
+            display: grid;
+            grid-template-columns: 1fr 180px;
+            gap: 10px;
+        }
+        .channels-admin-list {
+            max-height: 380px;
+            overflow-y: auto;
+            border: 1px solid #222;
+            border-radius: 8px;
+            background: #080808;
+            margin-top: 4px;
+        }
+        .list-info {
+            font-size: 0.8rem;
+            color: #6b7280;
+            margin-top: 8px;
+        }
+        .channel-title-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            border-bottom: 1px solid #171717;
+        }
+        .channel-title-row:last-child {
+            border-bottom: none;
+        }
+        .channel-title-row:hover {
+            background: #141414;
+        }
+        .row-main {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+            flex: 1;
+        }
+        .row-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            background: #6b7280;
+        }
+        .row-dot.ok { background: #22c55e; }
+        .row-dot.caido { background: #ef4444; }
+        .channel-title-text {
+            font-size: 0.9rem;
+            color: #f3f4f6;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .row-fecha {
+            font-size: 0.74rem;
+            color: #6b7280;
+            flex-shrink: 0;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 12px;
+            color: #3b82f6;
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        @media (max-width: 640px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .filters-row { grid-template-columns: 1fr; }
+            .row-fecha { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="admin-container">
+        <h1>⚙️ Panel de Control - Xuper TV</h1>
+
+        <div id="admin-msg" role="status" aria-live="polite"></div>
+
+        <div class="admin-section">
+            <div class="stats-grid">
+                <div class="stat-box"><div class="num" id="st-total">–</div><div class="lbl">Canales en total</div></div>
+                <div class="stat-box"><div class="num num-ok" id="st-ok">–</div><div class="lbl">En línea</div></div>
+                <div class="stat-box"><div class="num num-caido" id="st-caidos">–</div><div class="lbl">Caídos</div></div>
+                <div class="stat-box"><div class="num num-desc" id="st-desc">–</div><div class="lbl">Sin verificar</div></div>
+            </div>
+        </div>
+
+        <div class="admin-section">
+            <span class="section-title">Verificar canales:</span>
+            <div class="btn-row">
+                <button class="btn-action" id="btn-ver-todos" onclick="iniciarVerificacion('todos')">🔍 Verificar todos</button>
+                <button class="btn-action btn-neutral" id="btn-ver-pend" onclick="iniciarVerificacion('pendientes')">Solo sin verificar</button>
+                <button class="btn-action btn-neutral" id="btn-ver-prob" onclick="iniciarVerificacion('problemas')">Re-verificar caídos</button>
+                <button class="btn-action btn-neutral" id="btn-cancelar" onclick="cancelarVerificacion()" hidden>Cancelar</button>
+            </div>
+            <div class="progress-wrap" id="progress-wrap">
+                <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+                <div class="progress-text" id="progress-text"></div>
+            </div>
+        </div>
+
+        <div class="admin-section">
+            <label for="admin-m3u-url">Cargar nueva lista M3U:</label>
+            <input type="text" id="admin-m3u-url" placeholder="Pega la URL de la lista M3U aquí...">
+            <button class="btn-action" id="btn-importar" onclick="importarLista()">📥 Importar Canales</button>
+        </div>
+
+        <div class="admin-section">
+            <label for="admin-filter-input">Canales (eliminá los que no quieras):</label>
+            <div class="filters-row">
+                <input type="text" id="admin-filter-input" placeholder="Filtrar por título...">
+                <select id="admin-filter-estado" aria-label="Filtrar por estado">
+                    <option value="">Todos los estados</option>
+                    <option value="caido">Caídos</option>
+                    <option value="ok">En línea</option>
+                    <option value="desconocido">Sin verificar</option>
+                </select>
+            </div>
+            <div class="channels-admin-list" id="admin-channels-list">
+                <div style="padding: 14px; color: #777; font-size: 0.85rem;">Cargando canales...</div>
+            </div>
+            <div class="list-info" id="list-info"></div>
+        </div>
+
+        <div class="admin-section">
+            <span class="section-title">Zona de peligro (mantenimiento):</span>
+            <div class="btn-row">
+                <button class="btn-action btn-danger" id="btn-del-caidos" onclick="eliminarCaidos()">🧹 Eliminar canales caídos</button>
+                <button class="btn-action btn-danger" onclick="borrarBaseDatos()">🗑️ Borrar todos los canales</button>
+            </div>
+        </div>
+
+        <a href="/" class="back-link">📺 Volver al Reproductor Xuper TV</a>
+    </div>
+
+    <script>
+        let filtroTimeout = null;
+        let pollTimer = null;
+        let verificacionActiva = false;
+        let msgTimer = null;
+
+        /* ---------- Utilidades ---------- */
+        async function api(ruta, opciones) {
+            const res = await fetch(ruta, opciones);
+            let data = null;
+            try { data = await res.json(); } catch (e) { /* sin cuerpo */ }
+            if (!res.ok) {
+                const detalle = data && data.detail ? data.detail : `Error ${res.status}`;
+                throw new Error(detalle);
+            }
+            return data;
+        }
+
+        function mensaje(texto, tipo = 'info', duracion = 6000) {
+            const box = document.getElementById('admin-msg');
+            box.textContent = texto;
+            box.className = tipo;
+            clearTimeout(msgTimer);
+            if (duracion) msgTimer = setTimeout(() => { box.className = ''; }, duracion);
+        }
+
+        function formatearFecha(iso) {
+            if (!iso) return 'Sin verificar';
+            const d = new Date(iso);
+            return isNaN(d) ? '' : d.toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' });
+        }
+
+        /* ---------- Estadísticas ---------- */
+        async function actualizarStats() {
+            try {
+                const d = await api('/api/admin/stats');
+                document.getElementById('st-total').textContent = d.total_canales;
+                document.getElementById('st-ok').textContent = d.ok;
+                document.getElementById('st-caidos').textContent = d.caidos;
+                document.getElementById('st-desc').textContent = d.desconocidos;
+            } catch (e) {
+                mensaje('No se pudo conectar con el servidor.', 'error');
+            }
+        }
+
+        /* ---------- Lista de canales ---------- */
+        async function cargarCanales() {
+            const listaEl = document.getElementById('admin-channels-list');
+            const q = document.getElementById('admin-filter-input').value.trim();
+            const estado = document.getElementById('admin-filter-estado').value;
+            const params = new URLSearchParams();
+            if (q) params.set('q', q);
+            if (estado) params.set('estado', estado);
+
+            try {
+                const data = await api('/api/admin/canales?' + params.toString());
+                const infoEl = document.getElementById('list-info');
+
+                if (!data.items.length) {
+                    listaEl.innerHTML = '<div style="padding: 16px; color: #777; font-size: 0.85rem; text-align:center;">No hay canales para mostrar.</div>';
+                    infoEl.textContent = '';
+                    return;
+                }
+
+                const fragmento = document.createDocumentFragment();
+                data.items.forEach(canal => {
+                    const row = document.createElement('div');
+                    row.className = 'channel-title-row';
+                    row.id = `canal-row-${canal.id}`;
+
+                    const main = document.createElement('div');
+                    main.className = 'row-main';
+
+                    const dot = document.createElement('span');
+                    dot.className = 'row-dot ' + (canal.estado === 'ok' || canal.estado === 'caido' ? canal.estado : '');
+                    dot.title = canal.estado === 'ok' ? 'En línea' : canal.estado === 'caido' ? 'Caído' : 'Sin verificar';
+
+                    const titulo = document.createElement('span');
+                    titulo.className = 'channel-title-text';
+                    titulo.textContent = canal.nombre || 'Canal sin nombre';
+
+                    main.appendChild(dot);
+                    main.appendChild(titulo);
+
+                    const fecha = document.createElement('span');
+                    fecha.className = 'row-fecha';
+                    fecha.textContent = formatearFecha(canal.ultima_revision);
+
+                    const btn = document.createElement('button');
+                    btn.className = 'btn-del-item';
+                    btn.textContent = 'Eliminar';
+                    btn.onclick = () => eliminarCanal(canal.id, canal.nombre);
+
+                    row.appendChild(main);
+                    row.appendChild(fecha);
+                    row.appendChild(btn);
+                    fragmento.appendChild(row);
+                });
+
+                listaEl.innerHTML = '';
+                listaEl.appendChild(fragmento);
+                infoEl.textContent = data.total > data.items.length
+                    ? `Mostrando ${data.items.length} de ${data.total}. Usá el filtro para acotar.`
+                    : `${data.total} canal(es).`;
+            } catch (e) {
+                listaEl.innerHTML = '<div style="padding: 14px; color: #f87171; font-size: 0.85rem;">Error al obtener la lista de canales.</div>';
+            }
+        }
+
+        async function eliminarCanal(id, nombre) {
+            try {
+                await api(`/api/admin/canales/${id}`, { method: 'DELETE' });
+                const row = document.getElementById(`canal-row-${id}`);
+                if (row) row.remove();
+                actualizarStats();
+            } catch (e) {
+                mensaje(`No se pudo eliminar "${nombre}": ${e.message}`, 'error');
+            }
+        }
+
+        /* ---------- Verificación de canales ---------- */
+        function pintarProgreso(s) {
+            const wrap = document.getElementById('progress-wrap');
+            const fill = document.getElementById('progress-fill');
+            const texto = document.getElementById('progress-text');
+            const total = s.total || 0;
+            const pct = total ? Math.round((s.hechos / total) * 100) : 0;
+
+            wrap.classList.add('visible');
+            fill.style.width = pct + '%';
+
+            if (s.activo) {
+                texto.textContent = total
+                    ? `Verificando… ${s.hechos} de ${total} (${pct}%) · ${s.ok} en línea · ${s.caidos} caídos`
+                    : 'Preparando verificación…';
+            } else if (s.cancelado) {
+                texto.textContent = `Verificación cancelada: ${s.hechos} de ${total} revisados · ${s.ok} en línea · ${s.caidos} caídos`;
+            } else {
+                texto.textContent = `Verificación terminada: ${s.ok} en línea · ${s.caidos} caídos`;
+            }
+        }
+
+        function bloquearBotones(activa) {
+            ['btn-ver-todos', 'btn-ver-pend', 'btn-ver-prob'].forEach(id => {
+                document.getElementById(id).disabled = activa;
+            });
+            document.getElementById('btn-cancelar').hidden = !activa;
+        }
+
+        async function consultarProgreso() {
+            clearTimeout(pollTimer);
+            try {
+                const s = await api('/api/admin/verificar/estado');
+                const habiaEstado = verificacionActiva;
+                verificacionActiva = s.activo;
+                bloquearBotones(s.activo);
+
+                if (s.activo || s.inicio) pintarProgreso(s);
+
+                if (s.activo) {
+                    actualizarStats();
+                    pollTimer = setTimeout(consultarProgreso, 1500);
+                } else if (habiaEstado) {
+                    actualizarStats();
+                    cargarCanales();
+                    mensaje('Verificación finalizada.', 'ok');
+                }
+            } catch (e) {
+                pollTimer = setTimeout(consultarProgreso, 4000);
+            }
+        }
+
+        async function iniciarVerificacion(modo) {
+            try {
+                await api(`/api/admin/verificar?modo=${modo}`, { method: 'POST' });
+                verificacionActiva = true;
+                bloquearBotones(true);
+                mensaje('Verificación iniciada. Podés cerrar esta página: sigue corriendo en el servidor.', 'info');
+                consultarProgreso();
+            } catch (e) {
+                mensaje(e.message, 'error');
+            }
+        }
+
+        async function cancelarVerificacion() {
+            try {
+                await api('/api/admin/verificar/cancelar', { method: 'POST' });
+                mensaje('Cancelando… termina los chequeos que ya están en curso.', 'info');
+            } catch (e) {
+                mensaje(e.message, 'error');
+            }
+        }
+
+        /* ---------- Importar y mantenimiento ---------- */
+        async function importarLista() {
+            const input = document.getElementById('admin-m3u-url');
+            const boton = document.getElementById('btn-importar');
+            const url = input.value.trim();
+            if (!url) { mensaje('Ingresá una URL válida.', 'error'); return; }
+
+            boton.disabled = true;
+            mensaje('Importando canales, esto puede tardar unos segundos…', 'info', 0);
+            try {
+                const data = await api('/api/importar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url })
+                });
+                let texto = `Se importaron ${data.importados} canales nuevos.`;
+                if (data.omitidos) texto += ` ${data.omitidos} ya existían.`;
+                if (data.descartados) texto += ` ${data.descartados} se descartaron por no ser http/https.`;
+                mensaje(texto + ' Ejecutá "Solo sin verificar" para comprobar los nuevos.', 'ok', 10000);
+                input.value = '';
+                actualizarStats();
+                cargarCanales();
+            } catch (e) {
+                mensaje(`Error al importar: ${e.message}`, 'error');
+            } finally {
+                boton.disabled = false;
+            }
+        }
+
+        async function eliminarCaidos() {
+            if (!confirm('¿Eliminar de la base de datos todos los canales marcados como caídos?')) return;
+            try {
+                const data = await api('/api/admin/caidos', { method: 'DELETE' });
+                mensaje(`Se eliminaron ${data.eliminados} canales caídos.`, 'ok');
+                actualizarStats();
+                cargarCanales();
+            } catch (e) {
+                mensaje(`Error al eliminar: ${e.message}`, 'error');
+            }
+        }
+
+        async function borrarBaseDatos() {
+            if (!confirm('¿Estás seguro de vaciar la base de datos de canales?')) return;
+            try {
+                await api('/api/admin/limpiar', { method: 'DELETE' });
+                mensaje('Base de datos limpiada.', 'ok');
+                actualizarStats();
+                cargarCanales();
+            } catch (e) {
+                mensaje(`Error al limpiar: ${e.message}`, 'error');
+            }
+        }
+
+        /* ---------- Eventos e inicio ---------- */
+        document.getElementById('admin-filter-input').addEventListener('input', () => {
+            clearTimeout(filtroTimeout);
+            filtroTimeout = setTimeout(cargarCanales, 250);
+        });
+        document.getElementById('admin-filter-estado').addEventListener('change', cargarCanales);
+
+        actualizarStats();
+        cargarCanales();
+        consultarProgreso();   // si había una verificación corriendo, retoma el seguimiento
+    </script>
+</body>
+</html>
