@@ -403,113 +403,99 @@ class M3UImportRequest(BaseModel):
 
 
 _CODIGOS_A_IDIOMA = {
-    "spa": "Español",
-    "esp": "Español",
-    "spanish": "Español",
-    "castellano": "Español",
-    "es": "Español",
-    "ar": "Español",
-    "mx": "Español",
-    "cl": "Español",
-    "co": "Español",
-    "uy": "Español",
-    "pe": "Español",
-    "ve": "Español",
-    "ec": "Español",
-    "bo": "Español",
-    "py": "Español",
-    "cr": "Español",
-    "pa": "Español",
-    "do": "Español",
-    "gt": "Español",
-    "hn": "Español",
-    "ni": "Español",
-    "sv": "Español",
-    "eng": "Inglés",
-    "english": "Inglés",
-    "en": "Inglés",
-    "us": "Inglés",
-    "uk": "Inglés",
-    "gb": "Inglés",
-    "ca": "Inglés",
-    "au": "Inglés",
-    "por": "Portugués",
-    "portuguese": "Portugués",
-    "pt": "Portugués",
-    "br": "Portugués",
-    "fra": "Francés",
-    "fre": "Francés",
-    "french": "Francés",
-    "fr": "Francés",
-    "deu": "Alemán",
-    "ger": "Alemán",
-    "german": "Alemán",
-    "de": "Alemán",
-    "ita": "Italiano",
-    "italian": "Italiano",
-    "it": "Italiano",
-    "ara": "Árabe",
-    "arabic": "Árabe",
-    "rus": "Ruso",
-    "russian": "Ruso",
-    "jpn": "Japonés",
-    "japanese": "Japonés",
-    "zho": "Chino",
-    "chi": "Chino",
-    "chinese": "Chino",
+    # Español
+    "spa": "Español", "esp": "Español", "spanish": "Español", "castellano": "Español",
+    "es": "Español", "ar": "Español", "mx": "Español", "cl": "Español", "co": "Español",
+    "uy": "Español", "pe": "Español", "ve": "Español", "ec": "Español", "bo": "Español",
+    "py": "Español", "cr": "Español", "pa": "Español", "do": "Español", "gt": "Español",
+    "hn": "Español", "ni": "Español", "sv": "Español", "cu": "Español", "pr": "Español",
+    # Inglés
+    "eng": "Inglés", "english": "Inglés", "en": "Inglés", "us": "Inglés", "uk": "Inglés",
+    "gb": "Inglés", "ca": "Inglés", "au": "Inglés", "ie": "Inglés", "nz": "Inglés",
+    # Portugués
+    "por": "Portugués", "portuguese": "Portugués", "pt": "Portugués", "br": "Portugués",
+    "ao": "Portugués", "mz": "Portugués",
+    # Otros
+    "fra": "Francés", "fre": "Francés", "french": "Francés", "fr": "Francés",
+    "deu": "Alemán", "ger": "Alemán", "german": "Alemán", "de": "Alemán",
+    "ita": "Italiano", "italian": "Italiano", "it": "Italiano",
+    "ara": "Árabe", "arabic": "Árabe",
+    "rus": "Ruso", "russian": "Ruso",
+    "jpn": "Japonés", "japanese": "Japonés",
+    "zho": "Chino", "chi": "Chino", "chinese": "Chino",
 }
 
+# Países donde conviven varios idiomas: la lista por país NO alcanza como prueba.
+_PAISES_AMBIGUOS = {"us", "ca"}
+
+# Palabras explícitas en el nombre (sin códigos de 3 letras, que dan falsos positivos).
 _PALABRAS_IDIOMA = [
-    (r"\b(english|eng)\b", "Inglés"),
-    (r"\b(spanish|espanol|español|castellano|spa)\b", "Español"),
-    (r"\b(portuguese|portugues|português|por)\b", "Portugués"),
-    (r"\b(french|frances|francés|fra)\b", "Francés"),
-    (r"\b(german|aleman|alemán|deu)\b", "Alemán"),
-    (r"\b(italian|italiano|ita)\b", "Italiano"),
-    (r"\b(arabic|arabe|árabe|ara)\b", "Árabe"),
-    (r"\b(russian|ruso|rus)\b", "Ruso"),
-    (r"\b(japanese|japones|japonés|jpn|anime)\b", "Japonés"),
+    (r"\b(en espanol|en español|spanish|castellano|latino|latam|latinoamerica|latinoamérica)\b", "Español"),
+    (r"\b(english|ingles|inglés)\b", "Inglés"),
+    (r"\b(portuguese|portugues|português|brasil|brazil)\b", "Portugués"),
+    (r"\b(french|frances|francés)\b", "Francés"),
+    (r"\b(german|aleman|alemán)\b", "Alemán"),
+    (r"\b(italian|italiano)\b", "Italiano"),
+    (r"\b(arabic|arabe|árabe)\b", "Árabe"),
+    (r"\b(russian|ruso)\b", "Ruso"),
+    (r"\b(japanese|japones|japonés)\b", "Japonés"),
 ]
 
 
-def detectar_idioma(linea_extinf: str, nombre: str, url_lista: str) -> str:
-    match_lang = re.search(r'tvg-language="([^"]+)"', linea_extinf, re.IGNORECASE)
-    if match_lang:
-        raw = match_lang.group(1).strip().lower()
-        if raw in _CODIGOS_A_IDIOMA:
-            return _CODIGOS_A_IDIOMA[raw]
-        for codigo, etiqueta in _CODIGOS_A_IDIOMA.items():
-            if re.search(rf"\b{re.escape(codigo)}\b", raw):
-                return etiqueta
-        if raw:
-            return raw.capitalize()
+def _etiqueta_desde_codigo(raw: str):
+    """Convierte 'spa', 'Spanish', 'es;en'... en una etiqueta ('Español'). None si no la conoce."""
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return None
+    if raw in _CODIGOS_A_IDIOMA:
+        return _CODIGOS_A_IDIOMA[raw]
+    for codigo, etiqueta in _CODIGOS_A_IDIOMA.items():
+        if re.search(rf"\b{re.escape(codigo)}\b", raw):
+            return etiqueta
+    return None
+
+
+def idioma_definitivo(linea_extinf: str, url_lista: str):
+    """Idioma según fuentes confiables (tvg-language o lista por idioma/país).
+    Devuelve None si no hay evidencia sólida. Es lo único con lo que se corrige un canal ya guardado."""
+    m_lang = re.search(r'tvg-language="([^"]+)"', linea_extinf or "", re.IGNORECASE)
+    if m_lang:
+        etiqueta = _etiqueta_desde_codigo(m_lang.group(1))
+        if etiqueta:
+            return etiqueta
 
     url_low = (url_lista or "").lower()
     m_url_lang = re.search(r"/languages/([a-z]{2,3})\.m3u", url_low)
-    if m_url_lang:
-        cod = m_url_lang.group(1)
-        if cod in _CODIGOS_A_IDIOMA:
-            return _CODIGOS_A_IDIOMA[cod]
+    if m_url_lang and m_url_lang.group(1) in _CODIGOS_A_IDIOMA:
+        return _CODIGOS_A_IDIOMA[m_url_lang.group(1)]
 
-    m_url_country = re.search(r"/countries/([a-z]{2,3})\.m3u", url_low)
-    if m_url_country:
-        cod = m_url_country.group(1)
-        if cod in _CODIGOS_A_IDIOMA:
+    m_url_pais = re.search(r"/countries/([a-z]{2,3})\.m3u", url_low)
+    if m_url_pais:
+        cod = m_url_pais.group(1)
+        if cod not in _PAISES_AMBIGUOS and cod in _CODIGOS_A_IDIOMA:
             return _CODIGOS_A_IDIOMA[cod]
+    return None
+
+
+def detectar_idioma(linea_extinf: str, nombre: str, url_lista: str) -> str:
+    definitivo = idioma_definitivo(linea_extinf, url_lista)
+    if definitivo:
+        return definitivo
 
     texto_nombre = (nombre or "").lower()
     for patron, etiqueta in _PALABRAS_IDIOMA:
         if re.search(patron, texto_nombre):
             return etiqueta
 
-    match_id = re.search(r'tvg-id="[^"@]*\.([a-z]{2,3})(?:@[^"]*)?"', linea_extinf, re.IGNORECASE)
+    match_id = re.search(r'tvg-id="[^"@]*\.([a-z]{2,3})(?:@[^"]*)?"', linea_extinf or "", re.IGNORECASE)
     if match_id:
         cod = match_id.group(1).lower()
         if cod in _CODIGOS_A_IDIOMA:
             return _CODIGOS_A_IDIOMA[cod]
 
-    if any(p in url_low for p in ("/spa.m3u", "/ar.m3u", "/mex.m3u", "/es.m3u", "/uy.m3u", "/cl.m3u", "/co.m3u", "/pe.m3u")):
-        return "Español"
+    m_url_pais = re.search(r"/countries/([a-z]{2,3})\.m3u", (url_lista or "").lower())
+    if m_url_pais and m_url_pais.group(1) in _CODIGOS_A_IDIOMA:
+        return _CODIGOS_A_IDIOMA[m_url_pais.group(1)]
 
     return "Otro"
 
@@ -567,7 +553,7 @@ def importar_m3u(datos: M3UImportRequest):
         print(f"[IMPORTAR 400] Contenido inválido en {url}: {lineas[:3]}")
         raise HTTPException(status_code=400, detail="El archivo descargado está vacío o no es una lista M3U válida.")
 
-    importados = omitidos = descartados = 0
+    importados = omitidos = descartados = actualizados = 0
     nombre_actual = None
     categoria_actual = "General"
     logo_actual = ""
@@ -576,10 +562,12 @@ def importar_m3u(datos: M3UImportRequest):
     with get_db() as db:
         urls_existentes = set()
         nombres_existentes = set()
-        for fila in db.execute("SELECT nombre, url FROM canales"):
+        ids_por_url = {}   # url normalizada -> (id, idioma guardado)
+        for fila in db.execute("SELECT id, nombre, url, idioma FROM canales"):
             u_norm = normalizar_url(fila["url"])
             if u_norm:
                 urls_existentes.add(u_norm)
+                ids_por_url[u_norm] = (fila["id"], fila["idioma"])
             n_norm = normalizar_nombre_canal(fila["nombre"])
             if n_norm:
                 nombres_existentes.add(n_norm)
@@ -600,7 +588,18 @@ def importar_m3u(datos: M3UImportRequest):
                         u_norm = normalizar_url(url_limpia)
                         n_norm = normalizar_nombre_canal(nombre_actual)
 
-                        if (u_norm and u_norm in urls_existentes) or (n_norm and n_norm in nombres_existentes):
+                        if u_norm and u_norm in urls_existentes:
+                            # Ya estaba: no se duplica, pero si la lista trae el idioma con
+                            # evidencia sólida (lista por idioma/país o tvg-language) se corrige.
+                            nuevo_idioma = idioma_definitivo(extinf_actual, url)
+                            id_exist, idioma_exist = ids_por_url.get(u_norm, (None, None))
+                            if id_exist and nuevo_idioma and nuevo_idioma != idioma_exist:
+                                db.execute("UPDATE canales SET idioma = ? WHERE id = ?", (nuevo_idioma, id_exist))
+                                ids_por_url[u_norm] = (id_exist, nuevo_idioma)
+                                actualizados += 1
+                            else:
+                                omitidos += 1
+                        elif n_norm and n_norm in nombres_existentes:
                             omitidos += 1
                         else:
                             idioma = detectar_idioma(extinf_actual, nombre_actual, url)
@@ -613,6 +612,7 @@ def importar_m3u(datos: M3UImportRequest):
                                 importados += 1
                                 if u_norm:
                                     urls_existentes.add(u_norm)
+                                    ids_por_url[u_norm] = (cur.lastrowid, idioma)
                                 if n_norm:
                                     nombres_existentes.add(n_norm)
                             else:
@@ -621,7 +621,13 @@ def importar_m3u(datos: M3UImportRequest):
                 logo_actual = ""
                 extinf_actual = ""
 
-    return {"status": "success", "importados": importados, "omitidos": omitidos, "descartados": descartados}
+    return {
+        "status": "success",
+        "importados": importados,
+        "omitidos": omitidos,
+        "descartados": descartados,
+        "actualizados": actualizados,
+    }
 
 
 # =====================================================================

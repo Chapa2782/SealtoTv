@@ -524,6 +524,7 @@
                     body: JSON.stringify({ url })
                 });
                 let texto = `Se importaron ${data.importados} canales nuevos.`;
+                if (data.actualizados) texto += ` ${data.actualizados} cambiaron de idioma.`;
                 if (data.omitidos) texto += ` ${data.omitidos} ya existían.`;
                 if (data.descartados) texto += ` ${data.descartados} se descartaron por no ser http/https.`;
                 mensaje(texto + ' Ejecutá "Solo sin verificar" para comprobar los nuevos.', 'ok', 10000);

@@ -362,30 +362,41 @@ function alternarMenuIdiomas(forzar) {
     el.btnFiltroLang.setAttribute('aria-expanded', abrir ? 'true' : 'false');
 }
 
+/** Convierte lo que guarda la base ('Español', 'Ingles', 'Portuguese'…) en ES / EN / PT. */
+function codigoIdioma(texto) {
+    const t = normalizar(String(texto || '')).trim();
+    if (!t) return '';
+    if (/\b(espanol|spanish|castellano|spa|esp|es)\b/.test(t)) return 'ES';
+    if (/\b(ingles|english|eng|en)\b/.test(t)) return 'EN';
+    if (/\b(portugues|portuguese|por|pt)\b/.test(t)) return 'PT';
+    return '';
+}
+
+/* Menú fijo: Todos, Español, Inglés y Portugués (con la cantidad de canales de cada uno) */
+const IDIOMAS_FILTRO = [
+    { valor: 'TODOS', etiqueta: 'Todos' },
+    { valor: 'ES', etiqueta: 'Español' },
+    { valor: 'EN', etiqueta: 'Inglés' },
+    { valor: 'PT', etiqueta: 'Portugués' },
+];
+
 function poblarDesplegableIdiomas() {
     if (!el.filtroLangMenu) return;
-    const setIdiomas = new Set();
-    todosLosCanales.forEach(c => {
-        const lang = (c && c.idioma ? String(c.idioma) : '').trim();
-        if (lang) setIdiomas.add(lang);
-    });
-    const idiomasOrdenados = Array.from(setIdiomas).sort((a, b) => a.localeCompare(b, 'es'));
 
-    if (idiomaFiltro !== 'TODOS' && !idiomasOrdenados.includes(idiomaFiltro)) {
-        idiomaFiltro = 'TODOS';
-        if (el.filtroLangValor) el.filtroLangValor.textContent = 'Todos';
-    }
+    const conteo = { ES: 0, EN: 0, PT: 0 };
+    todosLosCanales.forEach(c => { if (c && conteo[c._idioma] !== undefined) conteo[c._idioma]++; });
 
     el.filtroLangMenu.textContent = '';
-
-    const crearOpcion = (valor, etiqueta) => {
+    IDIOMAS_FILTRO.forEach(({ valor, etiqueta }) => {
+        const activa = idiomaFiltro === valor;
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'filtro-cat-opcion' + (idiomaFiltro === valor ? ' activa' : '');
+        btn.className = 'filtro-cat-opcion' + (activa ? ' activa' : '');
         btn.setAttribute('data-idioma', valor);
         btn.setAttribute('role', 'option');
-        btn.setAttribute('aria-selected', idiomaFiltro === valor ? 'true' : 'false');
-        btn.textContent = etiqueta;
+        btn.setAttribute('aria-selected', activa ? 'true' : 'false');
+        btn.textContent = valor === 'TODOS' ? etiqueta : `${etiqueta} (${conteo[valor]})`;
+
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -399,13 +410,11 @@ function poblarDesplegableIdiomas() {
             cerrarMenuIdiomas();
             aplicarFiltros();
         });
-        return btn;
-    };
-
-    el.filtroLangMenu.appendChild(crearOpcion('TODOS', 'Todos'));
-    idiomasOrdenados.forEach(lang => {
-        el.filtroLangMenu.appendChild(crearOpcion(lang, lang));
+        el.filtroLangMenu.appendChild(btn);
     });
+
+    const actual = IDIOMAS_FILTRO.find(i => i.valor === idiomaFiltro) || IDIOMAS_FILTRO[0];
+    if (el.filtroLangValor) el.filtroLangValor.textContent = actual.etiqueta;
 }
 
 function configurarDesplegableIdiomas() {
@@ -937,6 +946,7 @@ async function cargarCanalesIniciales() {
             c.id = Number(c.id);
             c._busqueda = normalizar(`${c.nombre || ''} ${c.categoria || ''} ${c.idioma || ''}`);
             c._clave = claveCanal(c.nombre);
+            c._idioma = codigoIdioma(c.idioma);
             canalPorId.set(c.id, c);
             if (c.url) canalPorUrl.set(c.url, c);
         });
@@ -958,7 +968,7 @@ function aplicarFiltros() {
         lista = lista.filter(c => coincideCategoriaFiltro(c, categoriaFiltro));
     }
     if (idiomaFiltro && idiomaFiltro !== 'TODOS') {
-        lista = lista.filter(c => (c.idioma || '').trim() === idiomaFiltro);
+        lista = lista.filter(c => c._idioma === idiomaFiltro);
     }
     if (ocultarCaidos) lista = lista.filter(c => c.estado !== 'caido');
     if (textoBusqueda) {
