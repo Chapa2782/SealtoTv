@@ -1187,6 +1187,21 @@ function configurarSesionUI() {
     el.loginDialog = document.getElementById('login-dialog');
     el.loginProveedores = document.getElementById('login-proveedores');
     el.loginCerrar = document.getElementById('login-cerrar');
+    el.loginSeparador = document.getElementById('login-separador');
+    el.tabIngresar = document.getElementById('tab-ingresar');
+    el.tabRegistro = document.getElementById('tab-registro');
+    el.loginForm = document.getElementById('login-form');
+    el.loginEmail = document.getElementById('login-email');
+    el.loginClave = document.getElementById('login-clave');
+    el.btnVerClave = document.getElementById('btn-ver-clave');
+    el.loginAyuda = document.getElementById('login-ayuda');
+    el.loginError = document.getElementById('login-error');
+    el.btnEnviar = document.getElementById('btn-enviar');
+
+    if (el.tabIngresar) el.tabIngresar.addEventListener('click', () => establecerModoLogin('ingresar'));
+    if (el.tabRegistro) el.tabRegistro.addEventListener('click', () => establecerModoLogin('registro'));
+    if (el.loginForm) el.loginForm.addEventListener('submit', enviarFormularioLogin);
+    if (el.btnVerClave) el.btnVerClave.addEventListener('click', alternarVerClave);
 
     if (el.btnLogin) el.btnLogin.addEventListener('click', abrirLogin);
     if (el.btnSalir) el.btnSalir.addEventListener('click', cerrarSesion);
@@ -1246,7 +1261,9 @@ function aplicarEstadoSesion() {
         const nombre = usuario.nombre || 'Usuario';
         if (el.userNombre) el.userNombre.textContent = nombre;
         if (el.userProveedor) {
-            el.userProveedor.textContent = `Cuenta de ${NOMBRES_PROVEEDOR[usuario.proveedor] || usuario.proveedor}`;
+            el.userProveedor.textContent = usuario.proveedor === 'local'
+                ? 'Cuenta con email'
+                : `Cuenta de ${NOMBRES_PROVEEDOR[usuario.proveedor] || usuario.proveedor}`;
         }
         if (el.userInicial) {
             el.userInicial.textContent = nombre.trim().charAt(0).toUpperCase() || '?';
@@ -1316,34 +1333,138 @@ async function cerrarSesion() {
     mostrarAvisoTransitorio('sesión cerrada');
 }
 
-/* ---------- Ventana de inicio de sesión ---------- */
-function mostrarTextoLogin(texto) {
-    if (!el.loginProveedores) return;
-    el.loginProveedores.textContent = '';
-    const p = document.createElement('p');
-    p.className = 'login-vacio';
-    p.textContent = texto;
-    el.loginProveedores.appendChild(p);
+/* ---------- Ventana de inicio de sesión / registro ---------- */
+let modoLogin = 'ingresar';        // 'ingresar' | 'registro'
+let enviandoLogin = false;
+const EMAIL_VALIDO = /^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$/;
+const CLAVE_MINIMA = 8;
+
+function mostrarErrorLogin(texto) {
+    if (!el.loginError) return;
+    el.loginError.textContent = texto || '';
+    el.loginError.hidden = !texto;
+}
+
+function establecerModoLogin(modo) {
+    modoLogin = modo;
+    const registro = modo === 'registro';
+    if (el.tabIngresar) {
+        el.tabIngresar.classList.toggle('activa', !registro);
+        el.tabIngresar.setAttribute('aria-selected', registro ? 'false' : 'true');
+    }
+    if (el.tabRegistro) {
+        el.tabRegistro.classList.toggle('activa', registro);
+        el.tabRegistro.setAttribute('aria-selected', registro ? 'true' : 'false');
+    }
+    if (el.btnEnviar) el.btnEnviar.textContent = registro ? 'Crear cuenta' : 'Ingresar';
+    if (el.loginClave) el.loginClave.setAttribute('autocomplete', registro ? 'new-password' : 'current-password');
+    if (el.loginAyuda) el.loginAyuda.hidden = !registro;
+    mostrarErrorLogin('');
+}
+
+function alternarVerClave() {
+    if (!el.loginClave || !el.btnVerClave) return;
+    const mostrar = el.loginClave.type === 'password';
+    el.loginClave.type = mostrar ? 'text' : 'password';
+    el.btnVerClave.setAttribute('aria-pressed', mostrar ? 'true' : 'false');
+    const texto = mostrar ? 'Ocultar contraseña' : 'Mostrar contraseña';
+    el.btnVerClave.setAttribute('aria-label', texto);
+    el.btnVerClave.title = texto;
+}
+
+function reiniciarFormularioLogin() {
+    if (el.loginForm) el.loginForm.reset();
+    if (el.loginClave) el.loginClave.type = 'password';
+    if (el.btnVerClave) {
+        el.btnVerClave.setAttribute('aria-pressed', 'false');
+        el.btnVerClave.setAttribute('aria-label', 'Mostrar contraseña');
+        el.btnVerClave.title = 'Mostrar contraseña';
+    }
+    establecerModoLogin('ingresar');
+}
+
+function mensajeDeErrorLogin(datos, status) {
+    if (datos && typeof datos.detail === 'string') return datos.detail;
+    if (status === 429) return 'Demasiados intentos. Esperá unos minutos y probá de nuevo.';
+    return 'No se pudo completar la acción. Revisá los datos e intentá de nuevo.';
+}
+
+async function enviarFormularioLogin(e) {
+    e.preventDefault();
+    if (enviandoLogin || !el.loginEmail || !el.loginClave || !el.btnEnviar) return;
+
+    const email = (el.loginEmail.value || '').trim();
+    const clave = el.loginClave.value || '';
+    const registro = modoLogin === 'registro';
+
+    if (!EMAIL_VALIDO.test(email)) {
+        mostrarErrorLogin('Ingresá un email válido.');
+        el.loginEmail.focus();
+        return;
+    }
+    if (!clave) {
+        mostrarErrorLogin('Ingresá tu contraseña.');
+        el.loginClave.focus();
+        return;
+    }
+    if (registro && clave.length < CLAVE_MINIMA) {
+        mostrarErrorLogin(`La contraseña debe tener al menos ${CLAVE_MINIMA} caracteres.`);
+        el.loginClave.focus();
+        return;
+    }
+
+    enviandoLogin = true;
+    el.btnEnviar.disabled = true;
+    el.btnEnviar.textContent = registro ? 'Creando cuenta…' : 'Ingresando…';
+    mostrarErrorLogin('');
+    try {
+        const r = await apiFetch(`${API_URL}/auth/${registro ? 'registro' : 'ingresar'}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, clave }),
+        });
+        let datos = null;
+        try { datos = await r.json(); } catch (_) { /* respuesta sin cuerpo */ }
+        if (!r.ok) {
+            mostrarErrorLogin(mensajeDeErrorLogin(datos, r.status));
+            return;
+        }
+        usuario = (datos && datos.usuario) || null;
+        el.loginClave.value = '';
+        aplicarEstadoSesion();
+        cerrarLogin();
+        mostrarAvisoTransitorio(registro ? 'cuenta creada · sesión iniciada' : 'sesión iniciada');
+        await cargarFavoritosServidor({ migrar: true });
+    } catch (err) {
+        mostrarErrorLogin('No se pudo conectar con el servidor. Probá de nuevo.');
+    } finally {
+        enviandoLogin = false;
+        el.btnEnviar.disabled = false;
+        el.btnEnviar.textContent = modoLogin === 'registro' ? 'Crear cuenta' : 'Ingresar';
+    }
 }
 
 async function abrirLogin() {
     if (!el.loginDialog) return;
+    reiniciarFormularioLogin();
     if (!el.loginDialog.open) {
         if (typeof el.loginDialog.showModal === 'function') el.loginDialog.showModal();
         else el.loginDialog.setAttribute('open', '');
     }
+    if (el.loginEmail) el.loginEmail.focus();
+
+    // Los botones de Google, GitHub, etc. aparecen solo si el servidor los tiene configurados.
     if (proveedoresCache === null) {
-        mostrarTextoLogin('Cargando…');
         try {
             const r = await apiFetch(`${API_URL}/auth/proveedores`);
             const d = await r.json();
             proveedoresCache = Array.isArray(d.proveedores) ? d.proveedores : [];
         } catch (e) {
-            mostrarTextoLogin('No se pudo conectar con el servidor. Probá de nuevo en un momento.');
+            renderizarProveedores([]);   // el acceso con email sigue disponible
             return;
         }
     }
-    renderizarProveedores();
+    renderizarProveedores(proveedoresCache);
 }
 
 function cerrarLogin() {
@@ -1352,14 +1473,15 @@ function cerrarLogin() {
     else el.loginDialog.removeAttribute('open');
 }
 
-function renderizarProveedores() {
+function renderizarProveedores(lista) {
     if (!el.loginProveedores) return;
-    if (!proveedoresCache || !proveedoresCache.length) {
-        mostrarTextoLogin('Todavía no hay métodos de acceso configurados en el servidor.');
-        return;
-    }
+    const hay = Array.isArray(lista) && lista.length > 0;
+    el.loginProveedores.hidden = !hay;
+    if (el.loginSeparador) el.loginSeparador.hidden = !hay;
     el.loginProveedores.textContent = '';
-    proveedoresCache.forEach(({ id, nombre }) => {
+    if (!hay) return;
+
+    lista.forEach(({ id, nombre }) => {
         const enlace = document.createElement('a');
         enlace.className = 'btn-prov';
         enlace.href = `/auth/login/${encodeURIComponent(id)}`;

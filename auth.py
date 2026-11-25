@@ -15,6 +15,11 @@ Otras variables opcionales:
 URI de redireccion que hay que registrar en cada proveedor:
     {BASE_URL}/auth/callback/google   (y /microsoft, /github, /discord)
 
+Registro e ingreso con email y contraseña (siempre disponible, sin configurar nada):
+  * Contraseñas con scrypt + sal aleatoria (nunca se guardan en texto plano).
+  * Límite de intentos fallidos por email y por IP.
+  * Todavía NO verifica el email ni permite recuperar la contraseña.
+
 Seguridad:
   * Sesión en el servidor (tabla `sesiones`); el navegador solo guarda un token aleatorio en una
     cookie HttpOnly + SameSite=Lax (+ Secure cuando el sitio va por HTTPS). El token se guarda
@@ -23,11 +28,15 @@ Seguridad:
   * Las operaciones que modifican datos exigen la cabecera X-Requested-With (anti-CSRF).
   * No se vinculan cuentas de distintos proveedores por email (el email puede no estar verificado).
 """
+import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -97,6 +106,9 @@ def init_auth_db():
                 expira TEXT NOT NULL
             )
         """)
+        columnas = {r["name"] for r in db.execute("PRAGMA table_info(usuarios)")}
+        if "clave_hash" not in columnas:
+            db.execute("ALTER TABLE usuarios ADD COLUMN clave_hash TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_sesiones_usuario ON sesiones(usuario_id)")
         db.execute("""
             CREATE TABLE IF NOT EXISTS favoritos (
@@ -312,6 +324,13 @@ def _publico(usuario: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _poner_cookie_sesion(resp, request: Request, token: str):
+    resp.set_cookie(
+        COOKIE_SESION, token, max_age=SESION_DIAS * 86400, httponly=True,
+        samesite="lax", secure=_es_https(request), path="/",
+    )
+
+
 def _volver(resultado: str) -> RedirectResponse:
     resp = RedirectResponse(f"/?login={resultado}", status_code=302)
     resp.delete_cookie(COOKIE_STATE, path="/")
@@ -424,10 +443,7 @@ def auth_callback(
 
     resp = RedirectResponse("/", status_code=302)
     resp.delete_cookie(COOKIE_STATE, path="/")
-    resp.set_cookie(
-        COOKIE_SESION, token_sesion, max_age=SESION_DIAS * 86400, httponly=True,
-        samesite="lax", secure=_es_https(request), path="/",
-    )
+    _poner_cookie_sesion(resp, request, token_sesion)
     return resp
 
 
@@ -441,6 +457,161 @@ def auth_salir(request: Request):
     resp = _json({"ok": True})
     resp.delete_cookie(COOKIE_SESION, path="/")
     return resp
+
+
+# =====================================================================
+# REGISTRO E INGRESO CON EMAIL Y CONTRASEÑA
+# =====================================================================
+CLAVE_MIN, CLAVE_MAX = 8, 128
+_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
+
+# Límites contra fuerza bruta (en memoria; se reinician al reiniciar el servidor)
+_VENTANA_FALLOS = 900            # 15 minutos
+_MAX_FALLOS_EMAIL = 5
+_MAX_FALLOS_IP = 20
+_VENTANA_REGISTROS = 3600        # 1 hora
+_MAX_REGISTROS_IP = 10
+_eventos = {}
+_eventos_lock = threading.Lock()
+
+
+def _cuantos(clave: str, ventana: int) -> int:
+    ahora = time.time()
+    with _eventos_lock:
+        recientes = [t for t in _eventos.get(clave, []) if ahora - t < ventana]
+        if recientes:
+            _eventos[clave] = recientes
+        else:
+            _eventos.pop(clave, None)
+        return len(recientes)
+
+
+def _anotar(clave: str):
+    with _eventos_lock:
+        if len(_eventos) > 10000:
+            _eventos.clear()
+        _eventos.setdefault(clave, []).append(time.time())
+
+
+def _olvidar(clave: str):
+    with _eventos_lock:
+        _eventos.pop(clave, None)
+
+
+def _ip(request: Request) -> str:
+    cliente = getattr(request, "client", None)
+    return getattr(cliente, "host", None) or "?"
+
+
+def _hashear_clave(clave: str) -> str:
+    sal = secrets.token_bytes(16)
+    if hasattr(hashlib, "scrypt"):
+        h = hashlib.scrypt(clave.encode("utf-8"), salt=sal, n=2 ** 14, r=8, p=1, dklen=32)
+        return "scrypt$16384$8$1$%s$%s" % (base64.b64encode(sal).decode(), base64.b64encode(h).decode())
+    iteraciones = 600000
+    h = hashlib.pbkdf2_hmac("sha256", clave.encode("utf-8"), sal, iteraciones, dklen=32)
+    return "pbkdf2$%d$%s$%s" % (iteraciones, base64.b64encode(sal).decode(), base64.b64encode(h).decode())
+
+
+_HASH_FALSO = _hashear_clave("clave-falsa-para-igualar-tiempos")
+
+
+def _verificar_clave(clave: str, guardado: Optional[str]) -> bool:
+    """Si el usuario no existe se hace igual el cálculo (con un hash falso) para que
+    la respuesta tarde lo mismo y no revele qué emails están registrados."""
+    es_falso = not guardado
+    try:
+        partes = (guardado or _HASH_FALSO).split("$")
+        if partes[0] == "scrypt":
+            _, n, r, p, sal, esperado = partes
+            calc = hashlib.scrypt(clave.encode("utf-8"), salt=base64.b64decode(sal),
+                                  n=int(n), r=int(r), p=int(p), dklen=32)
+        elif partes[0] == "pbkdf2":
+            _, iteraciones, sal, esperado = partes
+            calc = hashlib.pbkdf2_hmac("sha256", clave.encode("utf-8"), base64.b64decode(sal),
+                                       int(iteraciones), dklen=32)
+        else:
+            return False
+        coincide = secrets.compare_digest(calc, base64.b64decode(esperado))
+        return coincide and not es_falso
+    except Exception:
+        return False
+
+
+def _normalizar_email(email: str) -> Optional[str]:
+    limpio = (email or "").strip().lower()
+    return limpio if len(limpio) <= 254 and _EMAIL_RE.match(limpio) else None
+
+
+class CredencialesIn(BaseModel):
+    email: str
+    clave: str
+
+
+def _sesion_con_cookie(request: Request, usuario_id: int, nombre: str, email: str) -> JSONResponse:
+    token = _crear_sesion(usuario_id)
+    resp = _json({"usuario": _publico({"nombre": nombre, "email": email, "avatar": "", "proveedor": "local"})})
+    _poner_cookie_sesion(resp, request, token)
+    return resp
+
+
+@router.post("/api/auth/registro")
+def auth_registro(datos: CredencialesIn, request: Request):
+    _exigir_ajax(request)
+    ip = _ip(request)
+    if _cuantos("r:" + ip, _VENTANA_REGISTROS) >= _MAX_REGISTROS_IP:
+        raise HTTPException(status_code=429, detail="Se crearon demasiadas cuentas desde tu conexión. Probá más tarde.")
+
+    email = _normalizar_email(datos.email)
+    if not email:
+        raise HTTPException(status_code=400, detail="Ingresá un email válido.")
+    clave = datos.clave or ""
+    if len(clave) < CLAVE_MIN:
+        raise HTTPException(status_code=400, detail=f"La contraseña debe tener al menos {CLAVE_MIN} caracteres.")
+    if len(clave) > CLAVE_MAX:
+        raise HTTPException(status_code=400, detail=f"La contraseña no puede superar los {CLAVE_MAX} caracteres.")
+
+    nombre = email.split("@")[0][:80]
+    ahora = _ahora()
+    try:
+        with _db() as db:
+            cur = db.execute(
+                "INSERT INTO usuarios (proveedor, proveedor_id, nombre, email, avatar, creado, ultimo_acceso, clave_hash) "
+                "VALUES ('local', ?, ?, ?, '', ?, ?, ?)",
+                (email, nombre, email, ahora, ahora, _hashear_clave(clave)),
+            )
+            usuario_id = cur.lastrowid
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="Ese email ya está registrado. Probá ingresar.")
+
+    _anotar("r:" + ip)
+    return _sesion_con_cookie(request, usuario_id, nombre, email)
+
+
+@router.post("/api/auth/ingresar")
+def auth_ingresar(datos: CredencialesIn, request: Request):
+    _exigir_ajax(request)
+    ip = _ip(request)
+    email = _normalizar_email(datos.email) or "invalido"
+    if _cuantos("e:" + email, _VENTANA_FALLOS) >= _MAX_FALLOS_EMAIL or \
+            _cuantos("i:" + ip, _VENTANA_FALLOS) >= _MAX_FALLOS_IP:
+        raise HTTPException(status_code=429, detail="Demasiados intentos fallidos. Esperá unos minutos y probá de nuevo.")
+
+    with _db() as db:
+        fila = db.execute(
+            "SELECT id, nombre, clave_hash FROM usuarios WHERE proveedor = 'local' AND proveedor_id = ?",
+            (email,),
+        ).fetchone()
+
+    if not _verificar_clave((datos.clave or "")[:CLAVE_MAX], fila["clave_hash"] if fila else None):
+        _anotar("e:" + email)
+        _anotar("i:" + ip)
+        raise HTTPException(status_code=401, detail="Email o contraseña incorrectos.")
+
+    _olvidar("e:" + email)
+    with _db() as db:
+        db.execute("UPDATE usuarios SET ultimo_acceso = ? WHERE id = ?", (_ahora(), fila["id"]))
+    return _sesion_con_cookie(request, fila["id"], fila["nombre"] or "", email)
 
 
 # =====================================================================
