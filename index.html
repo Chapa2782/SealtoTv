@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sealto TV</title>
     <link rel="icon" type="image/png" href="/static/logo.png?v=99">
-    <link rel="stylesheet" href="/static/style.css?v=20">
+    <link rel="stylesheet" href="/static/style.css?v=22">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
 </head>
 <body>
@@ -49,6 +49,22 @@
                 <button class="cat-btn" data-cat="ANIME">🍥 <span>ANIME</span></button>
                 <button class="cat-btn" data-cat="EXPLORAR">🌐 <span>EXPLORAR</span></button>
             </nav>
+
+            <!-- Cuenta de usuario -->
+            <div class="user-area" id="user-area">
+                <button type="button" class="btn-login" id="btn-login">
+                    <span aria-hidden="true">👤</span> Iniciar sesión
+                </button>
+                <div class="user-card" id="user-card" hidden>
+                    <img class="user-avatar" id="user-avatar" alt="" referrerpolicy="no-referrer" hidden>
+                    <span class="user-avatar user-inicial" id="user-inicial" aria-hidden="true">?</span>
+                    <div class="user-datos">
+                        <span class="user-nombre" id="user-nombre"></span>
+                        <span class="user-proveedor" id="user-proveedor"></span>
+                    </div>
+                    <button type="button" class="btn-salir" id="btn-salir" title="Cerrar sesión" aria-label="Cerrar sesión">Salir</button>
+                </div>
+            </div>
         </aside>
 
         <!-- 2. Área central: reproductor, detalle del canal, aviso, desplegables, buscador y favoritos -->
@@ -174,6 +190,17 @@
 
     </div>
 
-    <script src="/static/app.js?v=21"></script>
+    <!-- Ventana de inicio de sesión -->
+    <dialog class="login-dialog" id="login-dialog" aria-labelledby="login-titulo">
+        <div class="login-card">
+            <button type="button" class="login-cerrar" id="login-cerrar" aria-label="Cerrar">✕</button>
+            <h2 id="login-titulo">Iniciar sesión</h2>
+            <p class="login-sub">Entrá para guardar tus canales favoritos y tenerlos en cualquier dispositivo.</p>
+            <div class="login-proveedores" id="login-proveedores"></div>
+            <p class="login-nota">Solo usamos tu nombre y foto de perfil para mostrarte tu cuenta. Nunca publicamos nada.</p>
+        </div>
+    </dialog>
+
+    <script src="/static/app.js?v=22"></script>
 </body>
 </html>

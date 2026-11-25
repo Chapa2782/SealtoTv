@@ -741,3 +741,255 @@ html, body {
         max-height: 500px;
     }
 }
+/* =====================================================================
+   CUENTA DE USUARIO
+   ===================================================================== */
+
+/* Sin sesión iniciada no se muestra nada relacionado con favoritos */
+body:not(.con-sesion) .favoritos-block,
+body:not(.con-sesion) .btn-corazon {
+    display: none !important;
+}
+
+/* Evita el parpadeo de "Iniciar sesión" mientras se consulta si ya hay sesión */
+body:not(.sesion-lista) .user-area {
+    visibility: hidden;
+}
+
+.user-area {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.user-area [hidden],
+.login-dialog [hidden] {
+    display: none !important;
+}
+
+.btn-login {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 11px 14px;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, var(--gold-light), var(--gold-main));
+    color: #1a1204;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.2s, transform 0.1s;
+}
+
+.btn-login:hover {
+    filter: brightness(1.08);
+}
+
+.btn-login:active {
+    transform: translateY(1px);
+}
+
+.btn-login:focus-visible,
+.btn-salir:focus-visible,
+.btn-prov:focus-visible,
+.login-cerrar:focus-visible {
+    outline: 2px solid var(--blue-light);
+    outline-offset: 2px;
+}
+
+.user-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+}
+
+.user-avatar {
+    width: 36px;
+    height: 36px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    object-fit: cover;
+    background: var(--blue-dark);
+}
+
+.user-inicial {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--gold-light);
+    font-weight: 700;
+    border: 1px solid var(--border-subtle);
+}
+
+.user-datos {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+}
+
+.user-nombre {
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.user-proveedor {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.btn-salir {
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-size: 1rem;
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+
+.btn-salir:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: rgba(239, 68, 68, 0.1);
+}
+
+/* --- Ventana de inicio de sesión --- */
+.login-dialog {
+    border: none;
+    padding: 0;
+    background: transparent;
+    width: min(420px, 92vw);
+    color: var(--text-primary);
+}
+
+.login-dialog::backdrop {
+    background: rgba(2, 6, 15, 0.75);
+    backdrop-filter: blur(3px);
+}
+
+.login-card {
+    position: relative;
+    padding: 28px 24px 22px;
+    background: linear-gradient(180deg, #0a1630 0%, #070f20 100%);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+.login-card h2 {
+    font-size: 1.25rem;
+    margin-bottom: 6px;
+}
+
+.login-sub {
+    font-size: 0.88rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    margin-bottom: 18px;
+}
+
+.login-cerrar {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 30px;
+    height: 30px;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    cursor: pointer;
+}
+
+.login-cerrar:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.login-proveedores {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.btn-prov {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    color: var(--text-primary);
+    font-size: 0.92rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.btn-prov:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--gold-main);
+}
+
+.btn-prov-icono {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+}
+
+.btn-prov-icono svg {
+    width: 100%;
+    height: 100%;
+}
+
+.login-vacio {
+    padding: 14px 6px;
+    font-size: 0.88rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.login-nota {
+    margin-top: 16px;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.btn-salir {
+    width: auto;
+    padding: 0 10px;
+    font-size: 0.76rem;
+    font-weight: 600;
+}
+
+/* El reset global (* { margin: 0 }) le quita el centrado a <dialog>: se lo devolvemos */
+.login-dialog {
+    margin: auto;
+}

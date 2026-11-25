@@ -16,6 +16,10 @@ Variables de entorno opcionales:
   TIMEOUT_CHEQUEO        (default 8, segundos por petición)
   PERMITIR_IPS_PRIVADAS  (default 0; poné 1 si tus streams están en tu red local)
 
+Login de usuarios (módulo auth.py, en la misma carpeta que este archivo):
+  GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET   (y lo mismo con MICROSOFT_, GITHUB_, DISCORD_)
+  BASE_URL               (ej. https://sealto.tv; si no se define se usa la dirección del navegador)
+
 Ejecutar con UN solo worker (el estado del chequeo vive en memoria):
   uvicorn app:app --host 0.0.0.0 --port 8000
 """
@@ -43,6 +47,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from auth import descripcion_config, init_auth_db, router as auth_router
+
 app = FastAPI(title="Sealto TV Backend", version="1.5")
 
 # --- RUTAS Y CONFIGURACIÓN ---
@@ -60,6 +66,7 @@ MAX_MANIFIESTO = 256 * 1024          # tope al leer un manifiesto HLS
 COOLDOWN_INDIVIDUAL = 30             # segundos entre verificaciones del mismo canal
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+app.include_router(auth_router)
 
 # El front se sirve desde este mismo servidor, no hace falta enviar credenciales.
 app.add_middleware(
@@ -163,6 +170,7 @@ def init_db():
 
 
 init_db()
+init_auth_db()
 
 
 def _ahora() -> str:
@@ -371,6 +379,8 @@ def _bucle_auto():
 
 @app.on_event("startup")
 def _al_iniciar():
+    for linea in descripcion_config():
+        print(linea)
     if AUTO_VERIFICAR_HORAS > 0:
         threading.Thread(target=_bucle_auto, daemon=True).start()
 
