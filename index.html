@@ -5,15 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sealto TV</title>
     <link rel="icon" type="image/png" href="/static/logo.png?v=99">
-    <link rel="stylesheet" href="/static/style.css?v=23">
+    <link rel="stylesheet" href="/static/style.css?v=24">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
 </head>
 <body>
-    <div class="xuper-container">
+    <div class="sealto-layout">
 
-        <!-- 1. Menú lateral izquierdo -->
-        <aside class="sidebar">
-            <div class="logo-area">
+        <!-- Barra superior: Logo + Sealto TV en el centro y Login a la derecha -->
+        <header class="top-header">
+            <div class="top-header-spacer" aria-hidden="true"></div>
+
+            <div class="logo-area top-brand">
                 <img src="/static/logo.png?v=99" alt="Logo Sealto TV" class="brand-logo"
                      onerror="this.style.display='none'; document.getElementById('brand-logo-fallback').style.display='block';">
                 <svg id="brand-logo-fallback" class="brand-logo" style="display:none;" viewBox="0 0 120 120" aria-hidden="true">
@@ -40,18 +42,8 @@
                 </div>
             </div>
 
-            <nav class="categories-nav" id="categories-container">
-                <button class="cat-btn active" data-cat="TV">📺 <span>TV</span></button>
-                <button class="cat-btn" data-cat="DESTACADOS">⭐ <span>DESTACADOS</span></button>
-                <button class="cat-btn" data-cat="PELICULA">🎬 <span>PELÍCULA</span></button>
-                <button class="cat-btn" data-cat="SERIES">🍿 <span>SERIES</span></button>
-                <button class="cat-btn" data-cat="KIDS">👶 <span>KIDS</span></button>
-                <button class="cat-btn" data-cat="ANIME">🍥 <span>ANIME</span></button>
-                <button class="cat-btn" data-cat="EXPLORAR">🌐 <span>EXPLORAR</span></button>
-            </nav>
-
-            <!-- Cuenta de usuario -->
-            <div class="user-area" id="user-area">
+            <!-- Cuenta de usuario arriba a la derecha -->
+            <div class="user-area top-user-area" id="user-area">
                 <button type="button" class="btn-login" id="btn-login">
                     <span aria-hidden="true">👤</span> Iniciar sesión
                 </button>
@@ -65,42 +57,36 @@
                     <button type="button" class="btn-salir" id="btn-salir" title="Cerrar sesión" aria-label="Cerrar sesión">Salir</button>
                 </div>
             </div>
-        </aside>
+        </header>
 
-        <!-- 2. Área central: reproductor, detalle del canal, aviso, desplegables, buscador y favoritos -->
-        <main class="main-content">
-            <div class="player-section">
-                <div class="video-container">
-                    <video id="video-player" controls autoplay playsinline></video>
+        <!-- Cuerpo principal en 3 columnas -->
+        <div class="xuper-container">
 
-                    <!-- Estado del reproductor: cargando, reconectando o error -->
-                    <div class="player-overlay" id="player-overlay" data-tipo="cargando" hidden>
-                        <div class="spinner" id="player-spinner"></div>
-                        <p id="player-msg" aria-live="polite"></p>
-                        <div class="overlay-actions" id="player-actions" hidden>
-                            <button type="button" class="btn-secundario" id="btn-reintentar">Reintentar</button>
-                        </div>
-                    </div>
+            <!-- 1. Columna izquierda: Búsqueda, Idioma, Categoría y Favoritos -->
+            <aside class="sidebar controls-sidebar">
+                <div class="search-container-tv">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="search-input" placeholder="Buscar canal...">
+                </div>
 
-                    <!-- Botón de favorito (corazón animado) -->
-                    <button type="button" class="btn-corazon" id="btn-corazon"
-                            aria-pressed="false" aria-label="Agregar a favoritos"
-                            title="Agregar a favoritos" hidden>
-                        <svg class="corazon-svg" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
-                        </svg>
+                <!-- Desplegable de idiomas -->
+                <div class="filter-dropdown-wrap" id="filter-lang-wrap">
+                    <button type="button" class="btn-filtro-cat" id="btn-filtro-lang"
+                            aria-expanded="false" aria-controls="filtro-lang-menu">
+                        <span class="filtro-cat-icon" aria-hidden="true">🌐</span>
+                        <span class="filtro-cat-label">Idioma:</span>
+                        <span class="filtro-cat-valor" id="filtro-lang-valor">Todos</span>
+                        <span class="filtro-cat-chevron" id="filtro-lang-chevron" aria-hidden="true">▾</span>
                     </button>
+                    <div class="filtro-cat-menu" id="filtro-lang-menu" role="listbox" hidden>
+                        <button type="button" class="filtro-cat-opcion activa" data-idioma="TODOS" role="option" aria-selected="true">Todos</button>
+                        <button type="button" class="filtro-cat-opcion" data-idioma="ES" role="option" aria-selected="false">Español</button>
+                        <button type="button" class="filtro-cat-opcion" data-idioma="EN" role="option" aria-selected="false">Inglés</button>
+                        <button type="button" class="filtro-cat-opcion" data-idioma="PT" role="option" aria-selected="false">Portugués</button>
+                    </div>
                 </div>
 
-                <!-- Detalle del canal en curso -->
-                <div class="current-channel-info">
-                    <h3 id="current-channel-title">Selecciona un canal</h3>
-                </div>
-
-                <!-- Aviso transitorio entre el detalle del canal y los desplegables -->
-                <div class="shortcut-aviso" id="shortcut-aviso" role="status" aria-live="polite" hidden></div>
-
-                <!-- Desplegable de categorías arriba de la lupa de búsqueda -->
+                <!-- Desplegable de categorías -->
                 <div class="filter-dropdown-wrap" id="filter-dropdown-wrap">
                     <button type="button" class="btn-filtro-cat" id="btn-filtro-cat"
                             aria-expanded="false" aria-controls="filtro-cat-menu">
@@ -120,29 +106,7 @@
                     </div>
                 </div>
 
-                <!-- Desplegable de idiomas cargados + Todos -->
-                <div class="filter-dropdown-wrap" id="filter-lang-wrap">
-                    <button type="button" class="btn-filtro-cat" id="btn-filtro-lang"
-                            aria-expanded="false" aria-controls="filtro-lang-menu">
-                        <span class="filtro-cat-icon" aria-hidden="true">🌐</span>
-                        <span class="filtro-cat-label">Idioma:</span>
-                        <span class="filtro-cat-valor" id="filtro-lang-valor">Todos</span>
-                        <span class="filtro-cat-chevron" id="filtro-lang-chevron" aria-hidden="true">▾</span>
-                    </button>
-                    <div class="filtro-cat-menu" id="filtro-lang-menu" role="listbox" hidden>
-                        <button type="button" class="filtro-cat-opcion activa" data-idioma="TODOS" role="option" aria-selected="true">Todos</button>
-                        <button type="button" class="filtro-cat-opcion" data-idioma="ES" role="option" aria-selected="false">Español</button>
-                        <button type="button" class="filtro-cat-opcion" data-idioma="EN" role="option" aria-selected="false">Inglés</button>
-                        <button type="button" class="filtro-cat-opcion" data-idioma="PT" role="option" aria-selected="false">Portugués</button>
-                    </div>
-                </div>
-
-                <div class="search-container-tv">
-                    <span class="search-icon">🔍</span>
-                    <input type="text" id="search-input" placeholder="Buscar canal...">
-                </div>
-
-                <!-- Favoritos: corazón al lado de la barra + panel desplegable -->
+                <!-- Favoritos: corazón al lado de la barra + lista desplegable debajo -->
                 <section class="favoritos-block">
                     <div class="favoritos-barra">
                         <button type="button" class="btn-corazon-barra" id="btn-corazon-barra"
@@ -170,24 +134,59 @@
                         </div>
                     </div>
                 </section>
-            </div>
-        </main>
+            </aside>
 
-        <!-- 3. Panel derecho: lista de canales -->
-        <aside class="channels-sidebar">
-            <h3>CANALES</h3>
-            <div class="channels-meta">
-                <label class="toggle-caidos">
-                    <input type="checkbox" id="toggle-caidos">
-                    <span>Ocultar caídos</span>
-                </label>
-                <span class="channels-stats" id="channels-stats"></span>
-            </div>
-            <div class="channels-list" id="channels-container">
-                <!-- Se cargan dinámicamente -->
-            </div>
-        </aside>
+            <!-- 2. Columna central: Reproductor y Nombre del canal en reproducción -->
+            <main class="main-content">
+                <div class="player-section">
+                    <div class="video-container">
+                        <video id="video-player" controls autoplay playsinline></video>
 
+                        <!-- Estado del reproductor: cargando, reconectando o error -->
+                        <div class="player-overlay" id="player-overlay" data-tipo="cargando" hidden>
+                            <div class="spinner" id="player-spinner"></div>
+                            <p id="player-msg" aria-live="polite"></p>
+                            <div class="overlay-actions" id="player-actions" hidden>
+                                <button type="button" class="btn-secundario" id="btn-reintentar">Reintentar</button>
+                            </div>
+                        </div>
+
+                        <!-- Botón de favorito (corazón animado) -->
+                        <button type="button" class="btn-corazon" id="btn-corazon"
+                                aria-pressed="false" aria-label="Agregar a favoritos"
+                                title="Agregar a favoritos" hidden>
+                            <svg class="corazon-svg" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <!-- Nombre del canal en reproducción -->
+                    <div class="current-channel-info">
+                        <h3 id="current-channel-title">Selecciona un canal</h3>
+                    </div>
+
+                    <!-- Aviso transitorio de atajos -->
+                    <div class="shortcut-aviso" id="shortcut-aviso" role="status" aria-live="polite" hidden></div>
+                </div>
+            </main>
+
+            <!-- 3. Columna derecha: Lista de canales -->
+            <aside class="channels-sidebar">
+                <h3>CANALES</h3>
+                <div class="channels-meta">
+                    <label class="toggle-caidos">
+                        <input type="checkbox" id="toggle-caidos">
+                        <span>Ocultar caídos</span>
+                    </label>
+                    <span class="channels-stats" id="channels-stats"></span>
+                </div>
+                <div class="channels-list" id="channels-container">
+                    <!-- Se cargan dinámicamente -->
+                </div>
+            </aside>
+
+        </div>
     </div>
 
     <!-- Ventana de inicio de sesión / registro -->
@@ -197,7 +196,6 @@
             <h2 id="login-titulo">Iniciar sesión</h2>
             <p class="login-sub">Entrá para guardar tus canales favoritos y tenerlos en cualquier dispositivo.</p>
 
-            <!-- Google, GitHub, etc. (solo aparecen los que estén configurados en el servidor) -->
             <div class="login-proveedores" id="login-proveedores" hidden></div>
             <div class="login-separador" id="login-separador" hidden><span>o con tu email</span></div>
 
@@ -228,6 +226,6 @@
         </div>
     </dialog>
 
-    <script src="/static/app.js?v=23"></script>
+    <script src="/static/app.js?v=24"></script>
 </body>
 </html>

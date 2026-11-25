@@ -1,22 +1,5 @@
 /* =====================================================================
    Sealto TV - front
-- Carga progresiva por scroll en la lista de canales (sin trabar el arranque)
-- Estado de cada canal (en línea / caído / sin verificar) visible en la lista
-- Reproductor con reintentos con espera creciente, recuperación de errores
-     de HLS, detección de cortes (watchdog), cambio automático de fuente
-     y modo de estabilidad manual con colchón regulable
-- Filtros desplegables de categoría e idioma (dinámico según canales cargados)
-- Navegación de canales con teclas Arriba / Abajo (incluso en pantalla completa)
-- Navegación de categorías con teclas Izquierda / Derecha (incluso en pantalla completa)
-- Shortcuts alfanuméricos:
-  - Tecla 1: agregar / quitar canal actual de favoritos
-  - Tecla 2: alternar recorrido de flechas entre lista de favoritos y lista principal
-  - Tecla 3: habilitar / deshabilitar mute
-  - Tecla 4: bajar volumen
-  - Tecla 5: subir volumen
-  - Tecla 7: activar / desactivar modo estabilidad (colchón de señal)
-  - Tecla 8: reducir segundos del colchón de estabilidad
-  - Tecla 9: aumentar segundos del colchón de estabilidad (máx. 100s)
    ===================================================================== */
 const API_URL = '/api';
 
@@ -25,12 +8,10 @@ const ESTADO_TEXTO = { ok: 'En línea', caido: 'Caído', desconocido: 'Sin verif
 const STORAGE_FAVORITOS = 'xuper_tv_favoritos_v1';
 const PASO_VOLUMEN = 0.1;
 
-// Carga progresiva por scroll para no congelar el DOM con listas grandes
 const LOTE_INICIAL_CANALES = 45;
 const LOTE_SCROLL_CANALES = 35;
 const MARGEN_SCROLL_PX = 240;
 
-// Parámetros de estabilidad del reproductor
 const BACKOFF_MS = [2000, 4000, 8000, 15000];
 const MAX_REINTENTOS = BACKOFF_MS.length;
 const TIMEOUT_ARRANQUE_MS = 20000;
@@ -38,7 +19,6 @@ const TIMEOUT_CORTE_MS = 15000;
 const ESTABLE_TRAS_MS = 20000;
 const MAX_RECUPERACIONES_MEDIA = 2;
 
-// Parámetros del modo estabilidad (colchón regulable con teclas 8 y 9)
 const COLCHON_DEFAULT_SEG = 14;
 const COLCHON_MIN_SEG = 4;
 const COLCHON_MAX_SEG = 100;
@@ -64,8 +44,8 @@ let avisoFsDialog = null;
 let avisoFsTimer = null;
 let timerAviso = null;
 let timerShortcutAviso = null;
+let timerInicioCanal = null;
 
-// 'principal' | 'favoritos'
 let modoRecorrido = 'principal';
 
 const canalPorId = new Map();
@@ -73,8 +53,8 @@ const canalPorUrl = new Map();
 const tarjetas = new Map();
 let tarjetaActiva = null;
 
-let favoritos = [];                 // URLs favoritas de la cuenta (vienen del servidor)
-let usuario = null;                 // null = sin sesión iniciada
+let favoritos = [];
+let usuario = null;
 let ultimaSincronizacionFav = 0;
 const filasFav = new Map();
 let filaFavActiva = null;
@@ -92,7 +72,6 @@ const player = {
     watchdog: null,
     timerEstable: null,
     timerSpinner: null,
-    // Control manual de estabilidad / colchón
     modoColchon: false,
     esperandoColchon: false,
     timerColchon: null,
@@ -123,6 +102,47 @@ function claveCanal(nombre) {
 }
 function estadoDe(canal) {
     return ORDEN_ESTADO[canal && canal.estado] !== undefined ? canal.estado : 'desconocido';
+}
+
+function crearIconoTachoSvg() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '16');
+    svg.setAttribute('height', '16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+
+    const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    poly.setAttribute('points', '3 6 5 6 21 6');
+    svg.appendChild(poly);
+
+    const path1 = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path1.setAttribute('d', 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6');
+    svg.appendChild(path1);
+
+    const line1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line1.setAttribute('x1', '10');
+    line1.setAttribute('y1', '11');
+    line1.setAttribute('x2', '10');
+    line1.setAttribute('y2', '17');
+    svg.appendChild(line1);
+
+    const line2 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line2.setAttribute('x1', '14');
+    line2.setAttribute('y1', '11');
+    line2.setAttribute('x2', '14');
+    line2.setAttribute('y2', '17');
+    svg.appendChild(line2);
+
+    const path2 = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path2.setAttribute('d', 'M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2');
+    svg.appendChild(path2);
+
+    return svg;
 }
 
 /* ---------- Inicio ---------- */
@@ -197,8 +217,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (el.btnFavoritos) {
             el.btnFavoritos.addEventListener('click', () => alternarPanelFavoritos());
         }
-
-        // Los favoritos viven en el servidor (por cuenta): ver configurarSesionUI().
 
         window.addEventListener('online', () => {
             if (canalActivo && player.esperandoRed) {
@@ -361,7 +379,6 @@ function alternarMenuIdiomas(forzar) {
     el.btnFiltroLang.setAttribute('aria-expanded', abrir ? 'true' : 'false');
 }
 
-/** Convierte lo que guarda la base ('Español', 'Ingles', 'Portuguese'…) en ES / EN / PT. */
 function codigoIdioma(texto) {
     const t = normalizar(String(texto || '')).trim();
     if (!t) return '';
@@ -371,7 +388,6 @@ function codigoIdioma(texto) {
     return '';
 }
 
-/* Menú fijo: Todos, Español, Inglés y Portugués (con la cantidad de canales de cada uno) */
 const IDIOMAS_FILTRO = [
     { valor: 'TODOS', etiqueta: 'Todos' },
     { valor: 'ES', etiqueta: 'Español' },
@@ -613,7 +629,6 @@ function estaEnPantallaCompleta() {
 }
 
 function liberarFocoPantallaCompleta() {
-    if (!estaEnPantallaCompleta()) return;
     try {
         if (document.activeElement && typeof document.activeElement.blur === 'function') {
             document.activeElement.blur();
@@ -626,9 +641,11 @@ function liberarFocoPantallaCompleta() {
 
 function asegurarDialogPantallaCompleta() {
     if (avisoFsDialog) return avisoFsDialog;
-    const dlg = document.createElement('dialog');
-    dlg.id = 'xuper-fs-dialog';
-    Object.assign(dlg.style, {
+    const aviso = document.createElement('div');
+    aviso.id = 'xuper-fs-dialog';
+    aviso.setAttribute('role', 'status');
+    aviso.setAttribute('aria-live', 'polite');
+    Object.assign(aviso.style, {
         position: 'fixed',
         top: '28px',
         left: '28px',
@@ -644,44 +661,24 @@ function asegurarDialogPantallaCompleta() {
         boxShadow: '0 8px 24px rgba(0, 0, 0, 0.65)',
         outline: 'none',
         pointerEvents: 'none',
+        display: 'none',
         zIndex: '2147483647',
     });
 
-    const style = document.createElement('style');
-    style.textContent = `
-        #xuper-fs-dialog::backdrop {
-            background: transparent !important;
-        }
-    `;
-    document.head.appendChild(style);
-    document.body.appendChild(dlg);
-    avisoFsDialog = dlg;
-    return dlg;
+    document.body.appendChild(aviso);
+    avisoFsDialog = aviso;
+    return aviso;
 }
 
 function mostrarAvisoPantallaCompleta(texto, duracionMs = 2500) {
-    const dlg = asegurarDialogPantallaCompleta();
-    dlg.textContent = texto;
-
-    try {
-        if (!dlg.open) {
-            if (typeof dlg.showModal === 'function') {
-                dlg.showModal();
-                liberarFocoPantallaCompleta();
-            } else if (typeof dlg.show === 'function') {
-                dlg.show();
-            }
-        }
-    } catch (e) {
-        try {
-            if (typeof dlg.show === 'function' && !dlg.open) dlg.show();
-        } catch (_) { /* ignorar */ }
-    }
+    const aviso = asegurarDialogPantallaCompleta();
+    aviso.textContent = texto;
+    aviso.style.display = 'block';
 
     clearTimeout(avisoFsTimer);
     avisoFsTimer = setTimeout(() => {
-        if (dlg && dlg.open && typeof dlg.close === 'function') {
-            try { dlg.close(); } catch (_) { /* ignorar */ }
+        if (aviso) {
+            aviso.style.display = 'none';
         }
     }, duracionMs);
 }
@@ -728,8 +725,8 @@ function alternarModoRecorridoConTecla2() {
 function configurarTecladoCanales() {
     const alCambiarFs = () => {
         setTimeout(liberarFocoPantallaCompleta, 30);
-        if (!estaEnPantallaCompleta() && avisoFsDialog && avisoFsDialog.open) {
-            try { avisoFsDialog.close(); } catch (_) { /* ignorar */ }
+        if (!estaEnPantallaCompleta() && avisoFsDialog) {
+            avisoFsDialog.style.display = 'none';
         }
     };
 
@@ -763,12 +760,17 @@ function configurarTecladoCanales() {
 
         const enFs = estaEnPantallaCompleta();
         const activo = document.activeElement;
-        if (!enFs && activo && (
+        const escribiendoEnCampo = activo && (
             activo.tagName === 'INPUT' ||
             activo.tagName === 'TEXTAREA' ||
             activo.tagName === 'SELECT' ||
             activo.isContentEditable
-        )) {
+        );
+
+        if (!enFs && escribiendoEnCampo && !esFlechaVertical) {
+            return;
+        }
+        if (!enFs && escribiendoEnCampo && esFlechaVertical && activo && activo.id === 'search-input') {
             return;
         }
 
@@ -777,7 +779,8 @@ function configurarTecladoCanales() {
         if (typeof e.stopImmediatePropagation === 'function') {
             e.stopImmediatePropagation();
         }
-        if (enFs) liberarFocoPantallaCompleta();
+
+        liberarFocoPantallaCompleta();
 
         if (esUno) {
             const canal = obtenerCanalActualEfectivo();
@@ -882,7 +885,6 @@ function configurarTecladoCanales() {
     }
 }
 
-/** Resuelve el canal activo incluso si se seleccionó desde la lista o el título. */
 function obtenerCanalActualEfectivo() {
     if (canalActivo && canalActivo.url) return canalActivo;
 
@@ -968,19 +970,6 @@ function dispararInicioPrimerCanal() {
 
     inicioAutomaticoPendiente = false;
     reproducirCanal(primerCanal);
-
-    // Respaldo de autoplay: si el navegador bloquea el inicio con audio, mutear y reproducir
-    if (el.video) {
-        const promesa = el.video.play();
-        if (promesa && typeof promesa.catch === 'function') {
-            promesa.catch((err) => {
-                if (err && err.name === 'NotAllowedError') {
-                    el.video.muted = true;
-                    el.video.play().catch(() => {});
-                }
-            });
-        }
-    }
 }
 
 function aplicarFiltros() {
@@ -1113,7 +1102,7 @@ function crearTarjeta(canal, { favorito = false } = {}) {
         const quitar = document.createElement('button');
         quitar.type = 'button';
         quitar.className = 'fav-quitar';
-        quitar.textContent = '✕';
+        quitar.appendChild(crearIconoTachoSvg());
         quitar.title = 'Quitar de favoritos';
         quitar.setAttribute('aria-label', `Quitar ${canal.nombre || 'canal'} de favoritos`);
         quitar.addEventListener('click', (e) => {
@@ -1173,24 +1162,16 @@ function marcarFilaFavActiva() {
 }
 
 /* =====================================================================
-   CUENTA DE USUARIO (LOGIN CON GOOGLE, MICROSOFT, GITHUB, DISCORD)
-- Sin sesión: se puede ver y reproducir todo, pero la barra de favoritos queda oculta.
-- Con sesión: aparecen los favoritos guardados en la cuenta.
+   CUENTA DE USUARIO
    ===================================================================== */
-const NOMBRES_PROVEEDOR = { google: 'Google', microsoft: 'Microsoft', github: 'GitHub', discord: 'Discord' };
+const NOMBRES_PROVEEDOR = { google: 'Google', microsoft: 'Microsoft', github: 'GitHub', discord: 'Discord', local: 'local' };
 const MENSAJES_LOGIN = {
     cancelado: 'inicio de sesión cancelado',
     error: 'no se pudo iniciar sesión · probá de nuevo',
     no_configurado: 'ese método de acceso todavía no está disponible',
 };
-// Íconos fijos (no contienen datos de usuarios)
-const ICONOS_PROVEEDOR = {
-    google: '<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>',
-    microsoft: '<svg viewBox="0 0 23 23" aria-hidden="true"><path fill="#f25022" d="M1 1h10v10H1z"/><path fill="#7fba00" d="M12 1h10v10H12z"/><path fill="#00a4ef" d="M1 12h10v10H1z"/><path fill="#ffb900" d="M12 12h10v10H12z"/></svg>',
-    github: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
-    discord: '<span aria-hidden="true">🎮</span>',
-};
 let proveedoresCache = null;
+let modoFormularioLogin = 'ingresar';
 
 function apiFetch(url, opciones = {}) {
     return fetch(url, {
@@ -1211,13 +1192,23 @@ function configurarSesionUI() {
     el.loginDialog = document.getElementById('login-dialog');
     el.loginProveedores = document.getElementById('login-proveedores');
     el.loginCerrar = document.getElementById('login-cerrar');
+    el.loginTitulo = document.getElementById('login-titulo');
+    el.tabIngresar = document.getElementById('tab-ingresar');
+    el.tabRegistro = document.getElementById('tab-registro');
+    el.loginForm = document.getElementById('login-form');
+    el.loginEmail = document.getElementById('login-email');
+    el.loginClave = document.getElementById('login-clave');
+    el.btnVerClave = document.getElementById('btn-ver-clave');
+    el.loginAyuda = document.getElementById('login-ayuda');
+    el.loginError = document.getElementById('login-error');
+    el.btnEnviar = document.getElementById('btn-enviar');
 
     if (el.btnLogin) el.btnLogin.addEventListener('click', abrirLogin);
     if (el.btnSalir) el.btnSalir.addEventListener('click', cerrarSesion);
     if (el.loginCerrar) el.loginCerrar.addEventListener('click', cerrarLogin);
     if (el.loginDialog) {
         el.loginDialog.addEventListener('click', (e) => {
-            if (e.target === el.loginDialog) cerrarLogin();   // clic en el fondo oscuro
+            if (e.target === el.loginDialog) cerrarLogin();
         });
     }
     if (el.userAvatar) {
@@ -1227,7 +1218,23 @@ function configurarSesionUI() {
         });
     }
 
-    // Al volver a la pestaña se refrescan los favoritos (por si cambiaron en otro dispositivo)
+    if (el.tabIngresar) {
+        el.tabIngresar.addEventListener('click', () => cambiarModoLogin('ingresar'));
+    }
+    if (el.tabRegistro) {
+        el.tabRegistro.addEventListener('click', () => cambiarModoLogin('registro'));
+    }
+    if (el.btnVerClave && el.loginClave) {
+        el.btnVerClave.addEventListener('click', () => {
+            const mostrar = el.loginClave.type === 'password';
+            el.loginClave.type = mostrar ? 'text' : 'password';
+            el.btnVerClave.setAttribute('aria-pressed', mostrar ? 'true' : 'false');
+        });
+    }
+    if (el.loginForm) {
+        el.loginForm.addEventListener('submit', manejarEnvioLoginLocal);
+    }
+
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && usuario &&
             Date.now() - ultimaSincronizacionFav > 30000) {
@@ -1238,11 +1245,110 @@ function configurarSesionUI() {
     manejarResultadoLoginEnURL();
 }
 
+function cambiarModoLogin(modo) {
+    modoFormularioLogin = modo === 'registro' ? 'registro' : 'ingresar';
+    const esRegistro = modoFormularioLogin === 'registro';
+
+    if (el.loginTitulo) el.loginTitulo.textContent = esRegistro ? 'Crear cuenta' : 'Iniciar sesión';
+    if (el.tabIngresar) {
+        el.tabIngresar.classList.toggle('activa', !esRegistro);
+        el.tabIngresar.setAttribute('aria-selected', !esRegistro ? 'true' : 'false');
+    }
+    if (el.tabRegistro) {
+        el.tabRegistro.classList.toggle('activa', esRegistro);
+        el.tabRegistro.setAttribute('aria-selected', esRegistro ? 'true' : 'false');
+    }
+    if (el.loginClave) {
+        el.loginClave.setAttribute('autocomplete', esRegistro ? 'new-password' : 'current-password');
+    }
+    if (el.loginAyuda) el.loginAyuda.hidden = !esRegistro;
+    if (el.btnEnviar) el.btnEnviar.textContent = esRegistro ? 'Crear cuenta' : 'Ingresar';
+    ocultarErrorLogin();
+}
+
+function mostrarErrorLogin(texto) {
+    if (!el.loginError) return;
+    el.loginError.textContent = texto;
+    el.loginError.hidden = false;
+}
+
+function ocultarErrorLogin() {
+    if (!el.loginError) return;
+    el.loginError.textContent = '';
+    el.loginError.hidden = true;
+}
+
+async function enviarCredencialesLocales(email, clave, modo) {
+    const rutas = modo === 'registro'
+        ? [`${API_URL}/auth/registro`, `${API_URL}/auth/register`, `${API_URL}/auth/local/registro`]
+        : [`${API_URL}/auth/login`, `${API_URL}/auth/local/login`, `${API_URL}/auth/ingresar`];
+
+    let ultimoError = 'No se pudo iniciar sesión. Revisá tu email y contraseña.';
+
+    for (const ruta of rutas) {
+        try {
+            const r = await apiFetch(ruta, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, clave, password: clave }),
+            });
+
+            if (r.status === 404) continue;
+
+            let datos = null;
+            try { datos = await r.json(); } catch (_) { datos = null; }
+
+            if (!r.ok) {
+                ultimoError = (datos && (datos.detail || datos.error || datos.mensaje)) || ultimoError;
+                return { ok: false, error: typeof ultimoError === 'string' ? ultimoError : 'Credenciales inválidas.' };
+            }
+            return { ok: true, datos };
+        } catch (_) {
+            ultimoError = 'No se pudo conectar con el servidor.';
+        }
+    }
+    return { ok: false, error: ultimoError };
+}
+
+async function manejarEnvioLoginLocal(e) {
+    e.preventDefault();
+    ocultarErrorLogin();
+
+    const email = (el.loginEmail && el.loginEmail.value ? el.loginEmail.value : '').trim();
+    const clave = el.loginClave && el.loginClave.value ? el.loginClave.value : '';
+
+    if (!email || !clave) {
+        mostrarErrorLogin('Completá tu email y contraseña.');
+        return;
+    }
+    if (modoFormularioLogin === 'registro' && clave.length < 8) {
+        mostrarErrorLogin('La contraseña debe tener al menos 8 caracteres.');
+        return;
+    }
+
+    if (el.btnEnviar) el.btnEnviar.disabled = true;
+    const res = await enviarCredencialesLocales(email, clave, modoFormularioLogin);
+    if (el.btnEnviar) el.btnEnviar.disabled = false;
+
+    if (!res.ok) {
+        mostrarErrorLogin(res.error);
+        return;
+    }
+
+    if (el.loginClave) el.loginClave.value = '';
+    cerrarLogin();
+    await cargarSesion();
+    mostrarAvisoTransitorio('sesión iniciada');
+}
+
 function manejarResultadoLoginEnURL() {
     const params = new URLSearchParams(location.search);
     const resultado = params.get('login');
-    if (!resultado) return;
+    const tieneQueryCredenciales = params.has('email') || params.has('clave');
+    if (!resultado && !tieneQueryCredenciales) return;
     params.delete('login');
+    params.delete('email');
+    params.delete('clave');
     const resto = params.toString();
     history.replaceState(null, '', location.pathname + (resto ? `?${resto}` : '') + location.hash);
     if (MENSAJES_LOGIN[resultado]) mostrarAvisoTransitorio(MENSAJES_LOGIN[resultado], 4000);
@@ -1299,7 +1405,6 @@ async function cargarFavoritosServidor({ migrar = false } = {}) {
         const datos = await r.json();
         favoritos = Array.isArray(datos.urls) ? datos.urls : [];
 
-        // Una sola vez: pasa a la cuenta los favoritos que el navegador tenía guardados antes del login
         const locales = migrar ? leerFavoritosLocales() : [];
         if (locales.length) {
             const r2 = await apiFetch(`${API_URL}/favoritos/importar`, {
@@ -1352,6 +1457,7 @@ function mostrarTextoLogin(texto) {
 
 async function abrirLogin() {
     if (!el.loginDialog) return;
+    ocultarErrorLogin();
     if (!el.loginDialog.open) {
         if (typeof el.loginDialog.showModal === 'function') el.loginDialog.showModal();
         else el.loginDialog.setAttribute('open', '');
@@ -1390,7 +1496,7 @@ function renderizarProveedores() {
 
         const icono = document.createElement('span');
         icono.className = 'btn-prov-icono';
-        icono.innerHTML = ICONOS_PROVEEDOR[id] || '<span aria-hidden="true">🔑</span>';
+        icono.textContent = '🔑';
 
         const texto = document.createElement('span');
         texto.textContent = `Continuar con ${nombre}`;
@@ -1402,9 +1508,8 @@ function renderizarProveedores() {
 }
 
 /* =====================================================================
-   FAVORITOS (CORAZÓN JUNTO A LA BARRA DE FAVORITOS, GUARDADOS EN LA CUENTA)
+   FAVORITOS
    ===================================================================== */
-/** Favoritos que versiones anteriores guardaban en el navegador (solo se usan para migrarlos a la cuenta). */
 function leerFavoritosLocales() {
     try {
         const datos = JSON.parse(leerPref(STORAGE_FAVORITOS) || '[]');
@@ -1467,7 +1572,6 @@ function alternarFavorito(canal, { abrirPanel = true } = {}) {
     sincronizarFavorito(url, agregado);
 }
 
-/** Guarda el cambio en el servidor; si falla, deshace el cambio en pantalla. */
 async function sincronizarFavorito(url, agregado) {
     try {
         const r = agregado
@@ -1635,26 +1739,31 @@ function desarmarWatchdog() {
 
 function limpiarMotor() {
     player.sesion++;
+    clearTimeout(timerInicioCanal);
+    timerInicioCanal = null;
     detenerEsperaColchon();
     clearTimeout(player.timerReintento);
     clearTimeout(player.watchdog);
     clearTimeout(player.timerEstable);
     clearTimeout(player.timerSpinner);
     if (player.hls) {
-        try { player.hls.destroy(); } catch (e) { /* ya destruido */ }
+        const hlsInst = player.hls;
         player.hls = null;
+        try { hlsInst.stopLoad(); } catch (_) { /* ignorar */ }
+        try { hlsInst.detachMedia(); } catch (_) { /* ignorar */ }
+        try { hlsInst.destroy(); } catch (_) { /* ignorar */ }
     }
     player.modo = null;
     const v = el.video;
     if (v) {
-        v.pause();
-        v.removeAttribute('src');
-        v.load();
+        try { v.pause(); } catch (_) { /* ignorar */ }
+        try { v.removeAttribute('src'); } catch (_) { /* ignorar */ }
     }
 }
 
 function reproducirCanal(canal, { automatico = false, manual = false } = {}) {
     if (!canal || !canal.url) return;
+    limpiarMotor();
     inicioAutomaticoPendiente = false;
     if (el.favAviso) {
         el.favAviso.hidden = true;
@@ -1675,14 +1784,19 @@ function reproducirCanal(canal, { automatico = false, manual = false } = {}) {
     asegurarTarjetaEnDOM(canal.id);
     marcarTarjetaActiva();
     actualizarBotonCorazon();
-    iniciarReproduccion();
+
+    const sesionActual = player.sesion;
+    timerInicioCanal = setTimeout(() => {
+        if (sesionActual === player.sesion && canalActivo && canalActivo.id === canal.id) {
+            iniciarReproduccion();
+        }
+    }, 0);
 }
 
 function iniciarReproduccion() {
     const canal = canalActivo;
     if (!canal || !canal.url || !el.video) return;
 
-    limpiarMotor();
     const sesion = player.sesion;
     const video = el.video;
     const tipo = tipoDeUrl(canal.url);
@@ -1699,13 +1813,13 @@ function iniciarReproduccion() {
     if (usarHlsJs) {
         player.modo = 'hls';
         const hls = new Hls({
-            enableWorker: true,
+            enableWorker: false,
             manifestLoadingTimeOut: 10000,
-            manifestLoadingMaxRetry: 2,
+            manifestLoadingMaxRetry: 1,
             levelLoadingTimeOut: 10000,
-            levelLoadingMaxRetry: 3,
-            fragLoadingTimeOut: 20000,
-            fragLoadingMaxRetry: 4,
+            levelLoadingMaxRetry: 2,
+            fragLoadingTimeOut: 15000,
+            fragLoadingMaxRetry: 2,
             maxBufferLength: bufferObjetivo,
             maxMaxBufferLength: bufferObjetivo + 20,
             backBufferLength: 30,
@@ -1753,6 +1867,7 @@ function manejarErrorHls(data, sesion, esAuto) {
 
     if (esAuto && !player.forzarDirecto && data.details === ErrorDetails.MANIFEST_PARSING_ERROR) {
         player.forzarDirecto = true;
+        limpiarMotor();
         iniciarReproduccion();
         return;
     }
@@ -1771,7 +1886,11 @@ function manejarErrorHls(data, sesion, esAuto) {
 
 function programarReintento(motivo) {
     if (!canalActivo) return;
+    const canalRef = canalActivo;
+    const intentoActual = player.intento;
     limpiarMotor();
+    canalActivo = canalRef;
+    player.intento = intentoActual;
     console.warn('Reintento por:', motivo);
 
     if (!navigator.onLine) {
@@ -1786,8 +1905,13 @@ function programarReintento(motivo) {
 
     const espera = BACKOFF_MS[player.intento];
     player.intento++;
+    const sesionEsperada = player.sesion;
     mostrarOverlay('cargando', `Reconectando… intento ${player.intento} de ${MAX_REINTENTOS}`);
-    player.timerReintento = setTimeout(iniciarReproduccion, espera);
+    player.timerReintento = setTimeout(() => {
+        if (sesionEsperada === player.sesion && canalActivo && canalActivo.id === canalRef.id) {
+            iniciarReproduccion();
+        }
+    }, espera);
 }
 
 function buscarAlternativa(canal) {
