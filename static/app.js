@@ -1,261 +1,1873 @@
-// ==========================================
-// Sealto TV - Reproductor y Auto-Skip inicial
-// ==========================================
+/* =====================================================================
+   Sealto TV - front
+- Carga progresiva por scroll en la lista de canales (sin trabar el arranque)
+- Estado de cada canal (en línea / caído / sin verificar) visible en la lista
+- Reproductor con reintentos con espera creciente, recuperación de errores
+     de HLS, detección de cortes (watchdog), cambio automático de fuente
+     y modo de estabilidad manual con colchón regulable
+- Filtros desplegables de categoría e idioma (dinámico según canales cargados)
+- Navegación de canales con teclas Arriba / Abajo (incluso en pantalla completa)
+- Navegación de categorías con teclas Izquierda / Derecha (incluso en pantalla completa)
+- Shortcuts alfanuméricos:
+  - Tecla 1: agregar / quitar canal actual de favoritos
+  - Tecla 2: alternar recorrido de flechas entre lista de favoritos y lista principal
+  - Tecla 3: habilitar / deshabilitar mute
+  - Tecla 4: bajar volumen
+  - Tecla 5: subir volumen
+  - Tecla 7: activar / desactivar modo estabilidad (colchón de señal)
+  - Tecla 8: reducir segundos del colchón de estabilidad
+  - Tecla 9: aumentar segundos del colchón de estabilidad (máx. 100s)
+   ===================================================================== */
+const API_URL = '/api';
 
-const API_BASE = window.location.origin.includes(":5500")
-  ? "http://127.0.0.1:8000"
-  : "";
+const ORDEN_ESTADO = { ok: 0, desconocido: 1, caido: 2 };
+const ESTADO_TEXTO = { ok: 'En línea', caido: 'Caído', desconocido: 'Sin verificar' };
+const STORAGE_FAVORITOS = 'xuper_tv_favoritos_v1';
+const PASO_VOLUMEN = 0.1;
 
-let canalesActivos = [];
-let indiceActual = 0;
-let hlsInstance = null;
-let timerAutoSkip = null;
-let usuarioInteractuoConAudio = false;
+// Carga progresiva por scroll para no congelar el DOM con listas grandes
+const LOTE_INICIAL_CANALES = 45;
+const LOTE_SCROLL_CANALES = 35;
+const MARGEN_SCROLL_PX = 240;
 
-const MAX_AUTO_SKIP = 10;     // Máximo de canales a probar en cadena si fallan
-const TIMEOUT_CARGA_MS = 6000; // Tiempo máximo antes de saltar al siguiente canal
+// Parámetros de estabilidad del reproductor
+const BACKOFF_MS = [2000, 4000, 8000, 15000];
+const MAX_REINTENTOS = BACKOFF_MS.length;
+const TIMEOUT_ARRANQUE_MS = 20000;
+const TIMEOUT_CORTE_MS = 15000;
+const ESTABLE_TRAS_MS = 20000;
+const MAX_RECUPERACIONES_MEDIA = 2;
 
-// Elementos del DOM (ajustá los IDs si en tu index.html tienen otro nombre)
-function getVideoElement() {
-  return document.getElementById("video-player") || document.querySelector("video");
+// Parámetros del modo estabilidad (colchón regulable con teclas 8 y 9)
+const COLCHON_DEFAULT_SEG = 14;
+const COLCHON_MIN_SEG = 4;
+const COLCHON_MAX_SEG = 100;
+const COLCHON_PASO_SEG = 2;
+
+let colchonObjetivoSeg = COLCHON_DEFAULT_SEG;
+
+let todosLosCanales = [];
+let canalesSeccion = [];
+let canalesVisibles = [];
+let indiceRenderizado = 0;
+let cargandoLoteScroll = false;
+let inicioAutomaticoPendiente = true;
+
+let categoriasDisponibles = [];
+let categoriaFiltro = 'TODO';
+let idiomaFiltro = 'TODOS';
+let textoBusqueda = '';
+let ocultarCaidos = leerPref('ocultarCaidos') === '1';
+let canalActivo = null;
+let timeoutBusqueda = null;
+let avisoFsDialog = null;
+let avisoFsTimer = null;
+let timerAviso = null;
+let timerShortcutAviso = null;
+
+// 'principal' | 'favoritos'
+let modoRecorrido = 'principal';
+
+const canalPorId = new Map();
+const canalPorUrl = new Map();
+const tarjetas = new Map();
+let tarjetaActiva = null;
+
+let favoritos = [];                 // URLs favoritas de la cuenta (vienen del servidor)
+let usuario = null;                 // null = sin sesión iniciada
+let ultimaSincronizacionFav = 0;
+const filasFav = new Map();
+let filaFavActiva = null;
+
+const player = {
+    sesion: 0,
+    hls: null,
+    modo: null,
+    intento: 0,
+    recuperacionesMedia: 0,
+    forzarDirecto: false,
+    esperandoRed: false,
+    fuentesProbadas: new Set(),
+    timerReintento: null,
+    watchdog: null,
+    timerEstable: null,
+    timerSpinner: null,
+    // Control manual de estabilidad / colchón
+    modoColchon: false,
+    esperandoColchon: false,
+    timerColchon: null,
+    timerColchonTope: null,
+};
+
+const el = {};
+
+/* ---------- Utilidades ---------- */
+function leerPref(clave) {
+    try { return localStorage.getItem(clave); } catch (e) { return null; }
 }
-
-function getListaCanalesElement() {
-  return document.getElementById("lista-canales");
-}
-
-function getEstadoElement() {
-  return document.getElementById("estado-reproductor");
-}
-
-function setEstado(mensaje) {
-  const el = getEstadoElement();
-  if (el) {
-    el.textContent = mensaje || "";
-  }
-}
-
-// Marca visualmente el canal activo en la lista lateral
-function marcarCanalActivoEnUI(canalId) {
-  const items = document.querySelectorAll("[data-canal-id]");
-  items.forEach((item) => {
-    const esActivo = String(item.dataset.canalId) === String(canalId);
-    item.classList.toggle("active", esActivo);
-    item.classList.toggle("activo", esActivo);
-    if (esActivo) {
-      item.scrollIntoView({ behavior: "smooth", block: "nearest" });
+function guardarPref(clave, valor) {
+    try {
+        localStorage.setItem(clave, valor);
+        return true;
+    } catch (e) {
+        return false;
     }
-  });
+}
+function normalizar(texto) {
+    return (texto || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+function claveCanal(nombre) {
+    return normalizar(nombre)
+        .replace(/\b(hd|fhd|uhd|sd|4k|1080p?|720p?|480p?)\b/g, '')
+        .replace(/[^a-z0-9]/g, '');
+}
+function estadoDe(canal) {
+    return ORDEN_ESTADO[canal && canal.estado] !== undefined ? canal.estado : 'desconocido';
 }
 
-// Renderiza los canales en el contenedor lateral
-function renderizarListaCanales(canales) {
-  const contenedor = getListaCanalesElement();
-  if (!contenedor) return;
+/* ---------- Inicio ---------- */
+document.addEventListener('DOMContentLoaded', () => {
+    try {
+        el.video = document.getElementById('video-player');
+        el.overlay = document.getElementById('player-overlay');
+        el.spinner = document.getElementById('player-spinner');
+        el.msg = document.getElementById('player-msg');
+        el.acciones = document.getElementById('player-actions');
+        el.btnReintentar = document.getElementById('btn-reintentar');
+        el.titulo = document.getElementById('current-channel-title');
+        el.grilla = document.getElementById('channels-container');
+        el.stats = document.getElementById('channels-stats');
+        el.toggleCaidos = document.getElementById('toggle-caidos');
+        el.btnCorazon = document.getElementById('btn-corazon');
+        el.btnCorazonBarra = document.getElementById('btn-corazon-barra');
+        el.favAviso = document.getElementById('fav-aviso');
+        el.shortcutAviso = document.getElementById('shortcut-aviso');
+        el.btnFavoritos = document.getElementById('btn-favoritos');
+        el.favPanel = document.getElementById('favoritos-panel');
+        el.favLista = document.getElementById('favoritos-lista');
+        el.favCount = document.getElementById('fav-count');
+        el.btnFiltroCat = document.getElementById('btn-filtro-cat');
+        el.filtroCatValor = document.getElementById('filtro-cat-valor');
+        el.filtroCatMenu = document.getElementById('filtro-cat-menu');
+        el.btnFiltroLang = document.getElementById('btn-filtro-lang');
+        el.filtroLangValor = document.getElementById('filtro-lang-valor');
+        el.filtroLangMenu = document.getElementById('filtro-lang-menu');
 
-  contenedor.innerHTML = "";
+        if (el.video) configurarEventosVideo();
+        configurarScrollInfinitoCanales();
+        configurarBotonCorazonBarra();
+        configurarBotonesCategoria();
+        configurarDesplegableCategorias();
+        configurarDesplegableIdiomas();
+        configurarTecladoCanales();
+        renderizarFavoritos();
+        actualizarBotonCorazon();
+        cargarCanalesIniciales();
+        configurarSesionUI();
+        cargarSesion();
 
-  if (!canales.length) {
-    contenedor.innerHTML = `<div class="canal-vacio">No hay canales disponibles.</div>`;
-    return;
-  }
+        const inputBusqueda = document.getElementById('search-input');
+        if (inputBusqueda) {
+            inputBusqueda.addEventListener('input', (e) => {
+                clearTimeout(timeoutBusqueda);
+                const valor = e.target.value;
+                timeoutBusqueda = setTimeout(() => {
+                    textoBusqueda = valor.trim();
+                    aplicarFiltros();
+                }, 250);
+            });
+        }
 
-  canales.forEach((canal, idx) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "canal-item";
-    item.dataset.canalId = canal.id ?? idx;
+        if (el.toggleCaidos) {
+            el.toggleCaidos.checked = ocultarCaidos;
+            el.toggleCaidos.addEventListener('change', () => {
+                ocultarCaidos = el.toggleCaidos.checked;
+                guardarPref('ocultarCaidos', ocultarCaidos ? '1' : '0');
+                aplicarFiltros();
+            });
+        }
 
-    const nombre = canal.nombre || canal.name || `Canal ${idx + 1}`;
-    const categoria = canal.categoria || canal.group_title || "";
+        if (el.btnReintentar) {
+            el.btnReintentar.addEventListener('click', () => {
+                const canal = obtenerCanalActualEfectivo();
+                if (canal) reproducirCanal(canal, { manual: true });
+            });
+        }
 
-    item.innerHTML = `
-      <span class="canal-numero">${idx + 1}</span>
-      <span class="canal-info">
-        <span class="canal-nombre">${nombre}</span>
-        ${categoria ? `<span class="canal-categoria">${categoria}</span>` : ""}
-      </span>
-    `;
+        if (el.btnFavoritos) {
+            el.btnFavoritos.addEventListener('click', () => alternarPanelFavoritos());
+        }
 
-    item.addEventListener("click", () => {
-      usuarioInteractuoConAudio = true;
-      reproducirDesdeIndice(idx, 0);
+        // Los favoritos viven en el servidor (por cuenta): ver configurarSesionUI().
+
+        window.addEventListener('online', () => {
+            if (canalActivo && player.esperandoRed) {
+                player.esperandoRed = false;
+                player.intento = 0;
+                iniciarReproduccion();
+            }
+        });
+    } catch (err) {
+        console.error('Error al iniciar Sealto TV:', err);
+    }
+});
+
+/* ---------- Carga progresiva por scroll ---------- */
+function configurarScrollInfinitoCanales() {
+    if (!el.grilla) return;
+    el.grilla.addEventListener('scroll', () => {
+        if (cargandoLoteScroll) return;
+        if (indiceRenderizado >= canalesVisibles.length) return;
+        const restante = el.grilla.scrollHeight - el.grilla.scrollTop - el.grilla.clientHeight;
+        if (restante <= MARGEN_SCROLL_PX) {
+            cargandoLoteScroll = true;
+            requestAnimationFrame(() => {
+                renderizarSiguienteLote(LOTE_SCROLL_CANALES);
+                cargandoLoteScroll = false;
+            });
+        }
+    }, { passive: true });
+}
+
+function asegurarTarjetaEnDOM(canalId) {
+    if (tarjetas.has(canalId)) return tarjetas.get(canalId);
+    const idx = canalesVisibles.findIndex(c => Number(c.id) === Number(canalId));
+    if (idx === -1) return null;
+    while (indiceRenderizado <= idx && indiceRenderizado < canalesVisibles.length) {
+        renderizarSiguienteLote(LOTE_SCROLL_CANALES);
+    }
+    return tarjetas.get(canalId) || null;
+}
+
+/* ---------- Desplegable de categorías ---------- */
+function cerrarMenuCategorias() {
+    if (!el.filtroCatMenu || !el.btnFiltroCat) return;
+    el.filtroCatMenu.hidden = true;
+    el.btnFiltroCat.setAttribute('aria-expanded', 'false');
+}
+
+function alternarMenuCategorias(forzar) {
+    if (!el.filtroCatMenu || !el.btnFiltroCat) return;
+    const abrir = typeof forzar === 'boolean' ? forzar : el.filtroCatMenu.hidden;
+    el.filtroCatMenu.hidden = !abrir;
+    el.btnFiltroCat.setAttribute('aria-expanded', abrir ? 'true' : 'false');
+}
+
+function aplicarCategoriaSeleccionada(item, { mostrarAviso = false } = {}) {
+    if (!item) return;
+    categoriaFiltro = item.filtro;
+    if (el.filtroCatValor) el.filtroCatValor.textContent = item.etiqueta;
+
+    if (el.filtroCatMenu) {
+        el.filtroCatMenu.querySelectorAll('.filtro-cat-opcion').forEach(b => {
+            const esActiva = (b.getAttribute('data-filtro') || 'TODO') === item.filtro;
+            b.classList.toggle('activa', esActiva);
+            b.setAttribute('aria-selected', esActiva ? 'true' : 'false');
+        });
+    }
+
+    aplicarFiltros();
+    if (mostrarAviso) {
+        mostrarAvisoTransitorio(`categoría: ${item.etiqueta}`);
+    }
+}
+
+function navegarCategoriaConFlecha(direccion) {
+    if (!categoriasDisponibles.length) return;
+    const idxActual = categoriasDisponibles.findIndex(c => c.filtro === categoriaFiltro);
+    const base = idxActual === -1 ? 0 : idxActual;
+    const siguienteIdx = direccion === 'derecha'
+        ? (base + 1) % categoriasDisponibles.length
+        : (base - 1 + categoriasDisponibles.length) % categoriasDisponibles.length;
+
+    aplicarCategoriaSeleccionada(categoriasDisponibles[siguienteIdx], { mostrarAviso: true });
+}
+
+function coincideCategoriaFiltro(canal, filtro) {
+    if (!filtro || filtro === 'TODO') return true;
+    const cat = normalizar(canal.categoria || '');
+    const nom = normalizar(canal.nombre || '');
+    const texto = `${cat} ${nom}`;
+
+    if (filtro === 'NOTICIAS') {
+        return /\b(news|noticia|noticias|24\/7|informacion|actualidad|canal de noticias|tn|a24|c5n|ln\+)\b/.test(texto);
+    }
+    if (filtro === 'DEPORTES') {
+        return /\b(sport|sports|deporte|deportes|futbol|soccer|espn|tyc|fox sports|dsports|tnt sports|gol|motor)\b/.test(texto);
+    }
+    if (filtro === 'CINE_SERIES') {
+        return /\b(movie|movies|pelicula|peliculas|cine|film|series|serie|novela|novelas|telenovela|tnt series|tnt novelas|amc|cinecanal|warner|star|space|fx)\b/.test(texto);
+    }
+    if (filtro === 'ENTRETENIMIENTO') {
+        return /\b(entertainment|entretenimiento|variedades|general|show|reality|humor|comedia|comedy|lifestyle)\b/.test(texto);
+    }
+    if (filtro === 'MUSICA') {
+        return /\b(music|musica|radio|fm|cumbia|cuarteto|rock|pop|urban|hits|mtv|htv|quiero)\b/.test(texto);
+    }
+    if (filtro === 'INFANTIL') {
+        return /\b(kids|kid|infantil|animacion|animation|cartoon|disney|nick|pakapaka|plim plim|anime)\b/.test(texto);
+    }
+    return true;
+}
+
+function configurarDesplegableCategorias() {
+    if (!el.btnFiltroCat || !el.filtroCatMenu) return;
+
+    categoriasDisponibles = Array.from(el.filtroCatMenu.querySelectorAll('.filtro-cat-opcion'))
+        .map(op => ({
+            filtro: op.getAttribute('data-filtro') || 'TODO',
+            etiqueta: op.textContent.trim(),
+        }));
+
+    el.btnFiltroCat.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        cerrarMenuIdiomas();
+        alternarMenuCategorias();
     });
 
-    contenedor.appendChild(item);
-  });
-}
-
-// Limpia reproductor anterior y temporizadores
-function limpiarReproductor() {
-  clearTimeout(timerAutoSkip);
-  timerAutoSkip = null;
-
-  if (hlsInstance) {
-    hlsInstance.destroy();
-    hlsInstance = null;
-  }
-
-  const video = getVideoElement();
-  if (video) {
-    video.onplaying = null;
-    video.onerror = null;
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-  }
-}
-
-// Intenta reproducir el video respetando políticas de autoplay del navegador
-async function iniciarReproduccionSegura(video) {
-  try {
-    if (usuarioInteractuoConAudio) {
-      video.muted = false;
-    }
-    await video.play();
-  } catch (err) {
-    if (err && err.name === "NotAllowedError") {
-      // El navegador bloqueó el autoplay con audio: arrancamos muteados para mostrar imagen
-      video.muted = true;
-      setEstado("Reproduciendo sin audio (clic o tecla de volumen para activar sonido)");
-      try {
-        await video.play();
-      } catch (_) {
-        // Si falla incluso muteado, los eventos de error / timeout se encargan
-      }
-    }
-  }
-}
-
-// Reproduce un canal por índice y salta al siguiente si falla
-function reproducirDesdeIndice(indice, intentos = 0) {
-  const video = getVideoElement();
-  if (!video) return;
-
-  if (!canalesActivos.length) {
-    setEstado("Sin canales cargados");
-    return;
-  }
-
-  if (intentos >= MAX_AUTO_SKIP || indice >= canalesActivos.length) {
-    limpiarReproductor();
-    setEstado("No se pudo iniciar ningún canal automáticamente. Elegí uno de la lista.");
-    return;
-  }
-
-  indiceActual = indice;
-  const canal = canalesActivos[indiceActual];
-  const url = canal.url || canal.stream_url || canal.link;
-  const nombre = canal.nombre || canal.name || `Canal ${indiceActual + 1}`;
-
-  if (!url) {
-    reproducirDesdeIndice(indiceActual + 1, intentos + 1);
-    return;
-  }
-
-  limpiarReproductor();
-  marcarCanalActivoEnUI(canal.id ?? indiceActual);
-  setEstado(`Cargando ${nombre}...`);
-
-  let yaSalto = false;
-  const saltarAlSiguiente = (motivo) => {
-    if (yaSalto) return;
-    yaSalto = true;
-    clearTimeout(timerAutoSkip);
-    console.warn(`[Sealto TV] Falló "${nombre}" (${motivo}). Pasando al siguiente...`);
-    reproducirDesdeIndice(indiceActual + 1, intentos + 1);
-  };
-
-  // Si tarda más de TIMEOUT_CARGA_MS sin tener datos listos para reproducir, salta
-  timerAutoSkip = setTimeout(() => {
-    if (video.readyState < 3) {
-      saltarAlSiguiente("timeout");
-    }
-  }, TIMEOUT_CARGA_MS);
-
-  video.onplaying = () => {
-    clearTimeout(timerAutoSkip);
-    if (!video.muted) {
-      setEstado(`En vivo: ${nombre}`);
-    }
-  };
-
-  video.onerror = () => {
-    saltarAlSiguiente("video error");
-  };
-
-  const esHls = url.toLowerCase().includes(".m3u8");
-
-  if (esHls && window.Hls && window.Hls.isSupported()) {
-    hlsInstance = new window.Hls({
-      enableWorker: true,
-      manifestLoadingTimeOut: 5000,
-      levelLoadingTimeOut: 5000,
-      fragLoadingTimeOut: 6000
+    el.filtroCatMenu.querySelectorAll('.filtro-cat-opcion').forEach(op => {
+        op.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const item = {
+                filtro: op.getAttribute('data-filtro') || 'TODO',
+                etiqueta: op.textContent.trim(),
+            };
+            cerrarMenuCategorias();
+            aplicarCategoriaSeleccionada(item, { mostrarAviso: false });
+        });
     });
 
-    hlsInstance.loadSource(url);
-    hlsInstance.attachMedia(video);
-
-    hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
-      iniciarReproduccionSegura(video);
+    document.addEventListener('click', (e) => {
+        const wrap = document.getElementById('filter-dropdown-wrap');
+        if (wrap && !wrap.contains(e.target)) {
+            cerrarMenuCategorias();
+        }
     });
-
-    hlsInstance.on(window.Hls.Events.ERROR, (_event, data) => {
-      if (data && data.fatal) {
-        saltarAlSiguiente(`hls fatal: ${data.type}`);
-      }
-    });
-  } else {
-    video.src = url;
-    iniciarReproduccionSegura(video);
-  }
 }
 
-// Carga los canales desde FastAPI y arranca automáticamente en el primero
-async function cargarCanalesEIniciar(filtros = {}) {
-  try {
-    setEstado("Cargando canales...");
-    const params = new URLSearchParams();
-    if (filtros.categoria) params.set("categoria", filtros.categoria);
-    if (filtros.idioma) params.set("idioma", filtros.idioma);
-    if (filtros.buscar) params.set("q", filtros.buscar);
+/* ---------- Desplegable de idiomas cargados + Todos ---------- */
+function cerrarMenuIdiomas() {
+    if (!el.filtroLangMenu || !el.btnFiltroLang) return;
+    el.filtroLangMenu.hidden = true;
+    el.btnFiltroLang.setAttribute('aria-expanded', 'false');
+}
 
-    const queryStr = params.toString() ? `?${params.toString()}` : "";
-    const resp = await fetch(`${API_BASE}/api/canales${queryStr}`);
+function alternarMenuIdiomas(forzar) {
+    if (!el.filtroLangMenu || !el.btnFiltroLang) return;
+    const abrir = typeof forzar === 'boolean' ? forzar : el.filtroLangMenu.hidden;
+    el.filtroLangMenu.hidden = !abrir;
+    el.btnFiltroLang.setAttribute('aria-expanded', abrir ? 'true' : 'false');
+}
 
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}`);
-    }
+/** Convierte lo que guarda la base ('Español', 'Ingles', 'Portuguese'…) en ES / EN / PT. */
+function codigoIdioma(texto) {
+    const t = normalizar(String(texto || '')).trim();
+    if (!t) return '';
+    if (/\b(espanol|spanish|castellano|spa|esp|es)\b/.test(t)) return 'ES';
+    if (/\b(ingles|english|eng|en)\b/.test(t)) return 'EN';
+    if (/\b(portugues|portuguese|por|pt)\b/.test(t)) return 'PT';
+    return '';
+}
 
-    const data = await resp.json();
-    canalesActivos = Array.isArray(data) ? data : (data.canales || []);
+/* Menú fijo: Todos, Español, Inglés y Portugués (con la cantidad de canales de cada uno) */
+const IDIOMAS_FILTRO = [
+    { valor: 'TODOS', etiqueta: 'Todos' },
+    { valor: 'ES', etiqueta: 'Español' },
+    { valor: 'EN', etiqueta: 'Inglés' },
+    { valor: 'PT', etiqueta: 'Portugués' },
+];
 
-    renderizarListaCanales(canalesActivos);
+function poblarDesplegableIdiomas() {
+    if (!el.filtroLangMenu) return;
 
-    if (canalesActivos.length > 0) {
-      reproducirDesdeIndice(0, 0);
+    const conteo = { ES: 0, EN: 0, PT: 0 };
+    todosLosCanales.forEach(c => { if (c && conteo[c._idioma] !== undefined) conteo[c._idioma]++; });
+
+    el.filtroLangMenu.textContent = '';
+    IDIOMAS_FILTRO.forEach(({ valor, etiqueta }) => {
+        const activa = idiomaFiltro === valor;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'filtro-cat-opcion' + (activa ? ' activa' : '');
+        btn.setAttribute('data-idioma', valor);
+        btn.setAttribute('role', 'option');
+        btn.setAttribute('aria-selected', activa ? 'true' : 'false');
+        btn.textContent = valor === 'TODOS' ? etiqueta : `${etiqueta} (${conteo[valor]})`;
+
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            idiomaFiltro = valor;
+            if (el.filtroLangValor) el.filtroLangValor.textContent = etiqueta;
+            el.filtroLangMenu.querySelectorAll('.filtro-cat-opcion').forEach(b => {
+                const esActiva = b === btn;
+                b.classList.toggle('activa', esActiva);
+                b.setAttribute('aria-selected', esActiva ? 'true' : 'false');
+            });
+            cerrarMenuIdiomas();
+            aplicarFiltros();
+        });
+        el.filtroLangMenu.appendChild(btn);
+    });
+
+    const actual = IDIOMAS_FILTRO.find(i => i.valor === idiomaFiltro) || IDIOMAS_FILTRO[0];
+    if (el.filtroLangValor) el.filtroLangValor.textContent = actual.etiqueta;
+}
+
+function configurarDesplegableIdiomas() {
+    if (!el.btnFiltroLang || !el.filtroLangMenu) return;
+
+    el.btnFiltroLang.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        cerrarMenuCategorias();
+        alternarMenuIdiomas();
+    });
+
+    document.addEventListener('click', (e) => {
+        const wrap = document.getElementById('filter-lang-wrap');
+        if (wrap && !wrap.contains(e.target)) {
+            cerrarMenuIdiomas();
+        }
+    });
+}
+
+/* ---------- Solo TV tiene control de la lista principal ---------- */
+function configurarBotonesCategoria() {
+    document.querySelectorAll('.cat-btn').forEach(btn => {
+        const cat = (btn.getAttribute('data-cat') || '').toUpperCase();
+        if (cat === 'TV') {
+            btn.classList.add('active');
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                canalesSeccion = todosLosCanales;
+                aplicarFiltros();
+            });
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+}
+
+/* ---------- Control de audio (teclas 3, 4 y 5) ---------- */
+function alternarMute() {
+    if (!el.video) return;
+    el.video.muted = !el.video.muted;
+    mostrarAvisoTransitorio(el.video.muted ? 'mute activado' : 'mute desactivado');
+}
+
+function bajarVolumen() {
+    if (!el.video) return;
+    if (el.video.muted) el.video.muted = false;
+    const nuevoVol = Math.max(0, Math.round((el.video.volume - PASO_VOLUMEN) * 100) / 100);
+    el.video.volume = nuevoVol;
+    mostrarAvisoTransitorio(`volumen ${Math.round(nuevoVol * 100)}% · bajando`);
+}
+
+function subirVolumen() {
+    if (!el.video) return;
+    if (el.video.muted) el.video.muted = false;
+    const nuevoVol = Math.min(1, Math.round((el.video.volume + PASO_VOLUMEN) * 100) / 100);
+    el.video.volume = nuevoVol;
+    mostrarAvisoTransitorio(`volumen ${Math.round(nuevoVol * 100)}% · subiendo`);
+}
+
+/* ---------- Modo estabilidad manual (teclas 7, 8 y 9) ---------- */
+function alternarModoEstabilidadConTecla7() {
+    const activar = !player.modoColchon;
+    player.modoColchon = activar;
+
+    if (activar) {
+        mostrarAvisoTransitorio(`Estabilidad activada (${colchonObjetivoSeg}s)`);
+        const canal = obtenerCanalActualEfectivo();
+        if (canal && canal.url && el.video) {
+            if (obtenerSegundosBufferAdelantado() < colchonObjetivoSeg) {
+                iniciarEsperaColchon('Acumulando colchón de estabilidad');
+            }
+        }
     } else {
-      setEstado("No se encontraron canales con ese filtro.");
+        detenerEsperaColchon();
+        mostrarAvisoTransitorio('Estabilidad desactivada');
+        const canal = obtenerCanalActualEfectivo();
+        if (canal && canal.url && el.video) {
+            iniciarReproduccion();
+        }
     }
-  } catch (err) {
-    console.error("[Sealto TV] Error al obtener /api/canales:", err);
-    setEstado("Error al conectar con el servidor de canales.");
-  }
 }
 
-// Marca interacción del usuario para permitir audio en futuros cambios de canal
-["click", "keydown"].forEach((evento) => {
-  window.addEventListener(evento, () => {
-    usuarioInteractuoConAudio = true;
-    const video = getVideoElement();
-    if (video && video.muted && evento === "keydown") {
-      // Si el usuario presiona una tecla de volumen o M, podés desmutear acá según tu mapa de teclas
-    }
-  }, { passive: true });
-});
+function ajustarColchonEstabilidad(deltaSeg) {
+    colchonObjetivoSeg = Math.min(
+        COLCHON_MAX_SEG,
+        Math.max(COLCHON_MIN_SEG, colchonObjetivoSeg + deltaSeg)
+    );
 
-// Inicio al cargar la página
-document.addEventListener("DOMContentLoaded", () => {
-  cargarCanalesEIniciar();
-});
+    if (player.hls && player.hls.config) {
+        const bufferObjetivo = Math.max(45, colchonObjetivoSeg + 15);
+        player.hls.config.maxBufferLength = bufferObjetivo;
+        player.hls.config.maxMaxBufferLength = bufferObjetivo + 20;
+    }
+
+    const estadoTexto = player.modoColchon ? '' : ' (inactivo)';
+    mostrarAvisoTransitorio(`Colchón estabilidad: ${colchonObjetivoSeg}s${estadoTexto}`);
+
+    if (player.modoColchon && canalActivo && canalActivo.url && el.video) {
+        if (obtenerSegundosBufferAdelantado() < colchonObjetivoSeg && !player.esperandoColchon) {
+            iniciarEsperaColchon('Acumulando colchón de estabilidad');
+        }
+    }
+}
+
+function obtenerSegundosBufferAdelantado() {
+    const v = el.video;
+    if (!v || !v.buffered || v.buffered.length === 0) return 0;
+    const actual = v.currentTime || 0;
+    for (let i = 0; i < v.buffered.length; i++) {
+        const inicio = v.buffered.start(i);
+        const fin = v.buffered.end(i);
+        if (actual >= inicio - 0.5 && actual <= fin) {
+            return Math.max(0, fin - actual);
+        }
+    }
+    const primerFin = v.buffered.end(v.buffered.length - 1);
+    return Math.max(0, primerFin - actual);
+}
+
+function detenerEsperaColchon() {
+    player.esperandoColchon = false;
+    clearInterval(player.timerColchon);
+    clearTimeout(player.timerColchonTope);
+    player.timerColchon = null;
+    player.timerColchonTope = null;
+}
+
+function iniciarEsperaColchon(etiquetaBase = 'Acumulando colchón de estabilidad') {
+    if (!el.video || !canalActivo) return;
+    detenerEsperaColchon();
+
+    player.esperandoColchon = true;
+    const sesion = player.sesion;
+
+    try { el.video.pause(); } catch (_) { /* ignorar */ }
+    if (player.hls && typeof player.hls.startLoad === 'function') {
+        try { player.hls.startLoad(); } catch (_) { /* ignorar */ }
+    }
+
+    const actualizarProgreso = () => {
+        if (sesion !== player.sesion || !player.esperandoColchon || !player.modoColchon) {
+            detenerEsperaColchon();
+            return;
+        }
+        const cargado = obtenerSegundosBufferAdelantado();
+        const segs = Math.min(colchonObjetivoSeg, Math.floor(cargado));
+        mostrarOverlay('cargando', `${etiquetaBase}… ${segs}s / ${colchonObjetivoSeg}s`);
+
+        if (cargado >= colchonObjetivoSeg) {
+            detenerEsperaColchon();
+            ocultarOverlay();
+            intentarPlay();
+        }
+    };
+
+    actualizarProgreso();
+    player.timerColchon = setInterval(actualizarProgreso, 400);
+
+    const maxEsperaMs = Math.max(18000, colchonObjetivoSeg * 1400);
+    player.timerColchonTope = setTimeout(() => {
+        if (sesion !== player.sesion || !player.esperandoColchon) return;
+        detenerEsperaColchon();
+        ocultarOverlay();
+        intentarPlay();
+    }, maxEsperaMs);
+}
+
+/* ---------- Avisos transitorios ---------- */
+function mostrarAvisoEnPosicion(texto, duracionMs = 2500) {
+    if (!el.shortcutAviso) return;
+    el.shortcutAviso.textContent = texto;
+    el.shortcutAviso.hidden = false;
+    el.shortcutAviso.style.display = 'block';
+    clearTimeout(timerShortcutAviso);
+    timerShortcutAviso = setTimeout(() => {
+        el.shortcutAviso.hidden = true;
+        el.shortcutAviso.style.display = '';
+    }, duracionMs);
+}
+
+function mostrarAvisoTransitorio(texto, duracionMs = 2500) {
+    if (estaEnPantallaCompleta()) {
+        mostrarAvisoPantallaCompleta(texto, duracionMs);
+    } else {
+        mostrarAvisoEnPosicion(texto, duracionMs);
+    }
+}
+
+function estaEnPantallaCompleta() {
+    return Boolean(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        (el.video && el.video.webkitDisplayingFullscreen)
+    );
+}
+
+function liberarFocoPantallaCompleta() {
+    if (!estaEnPantallaCompleta()) return;
+    try {
+        if (document.activeElement && typeof document.activeElement.blur === 'function') {
+            document.activeElement.blur();
+        }
+        if (el.video && typeof el.video.blur === 'function') {
+            el.video.blur();
+        }
+    } catch (e) { /* ignorar */ }
+}
+
+function asegurarDialogPantallaCompleta() {
+    if (avisoFsDialog) return avisoFsDialog;
+    const dlg = document.createElement('dialog');
+    dlg.id = 'xuper-fs-dialog';
+    Object.assign(dlg.style, {
+        position: 'fixed',
+        top: '28px',
+        left: '28px',
+        margin: '0',
+        padding: '12px 18px',
+        borderRadius: '10px',
+        background: 'rgba(8, 16, 31, 0.92)',
+        color: '#f8fafc',
+        border: '1px solid rgba(245, 158, 11, 0.8)',
+        fontFamily: 'Segoe UI, sans-serif',
+        fontSize: '1.05rem',
+        fontWeight: '600',
+        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.65)',
+        outline: 'none',
+        pointerEvents: 'none',
+        zIndex: '2147483647',
+    });
+
+    const style = document.createElement('style');
+    style.textContent = `
+        #xuper-fs-dialog::backdrop {
+            background: transparent !important;
+        }
+    `;
+    document.head.appendChild(style);
+    document.body.appendChild(dlg);
+    avisoFsDialog = dlg;
+    return dlg;
+}
+
+function mostrarAvisoPantallaCompleta(texto, duracionMs = 2500) {
+    const dlg = asegurarDialogPantallaCompleta();
+    dlg.textContent = texto;
+
+    try {
+        if (!dlg.open) {
+            if (typeof dlg.showModal === 'function') {
+                dlg.showModal();
+                liberarFocoPantallaCompleta();
+            } else if (typeof dlg.show === 'function') {
+                dlg.show();
+            }
+        }
+    } catch (e) {
+        try {
+            if (typeof dlg.show === 'function' && !dlg.open) dlg.show();
+        } catch (_) { /* ignorar */ }
+    }
+
+    clearTimeout(avisoFsTimer);
+    avisoFsTimer = setTimeout(() => {
+        if (dlg && dlg.open && typeof dlg.close === 'function') {
+            try { dlg.close(); } catch (_) { /* ignorar */ }
+        }
+    }, duracionMs);
+}
+
+/* ---------- Canales favoritos efectivos para recorrer ---------- */
+function obtenerCanalesFavoritosDisponibles() {
+    if (!Array.isArray(favoritos) || !favoritos.length) return [];
+    const lista = favoritos
+        .map(u => canalPorUrl.get(u))
+        .filter(Boolean);
+    if (!ocultarCaidos) return lista;
+    return lista.filter(c => c.estado !== 'caido');
+}
+
+function obtenerListaRecorridoActiva() {
+    if (modoRecorrido === 'favoritos') {
+        const favs = obtenerCanalesFavoritosDisponibles();
+        if (favs.length > 0) return favs;
+        modoRecorrido = 'principal';
+    }
+    return canalesVisibles;
+}
+
+function alternarModoRecorridoConTecla2() {
+    const favs = obtenerCanalesFavoritosDisponibles();
+
+    if (modoRecorrido === 'favoritos') {
+        modoRecorrido = 'principal';
+        mostrarAvisoTransitorio('recorriendo lista principal');
+        return;
+    }
+
+    if (!favs.length) {
+        modoRecorrido = 'principal';
+        mostrarAvisoTransitorio('favoritos vacíos · recorriendo lista principal');
+        return;
+    }
+
+    modoRecorrido = 'favoritos';
+    mostrarAvisoTransitorio('recorriendo lista favoritos');
+}
+
+/* ---------- Navegación con flechas y shortcuts 1..9 ---------- */
+function configurarTecladoCanales() {
+    const alCambiarFs = () => {
+        setTimeout(liberarFocoPantallaCompleta, 30);
+        if (!estaEnPantallaCompleta() && avisoFsDialog && avisoFsDialog.open) {
+            try { avisoFsDialog.close(); } catch (_) { /* ignorar */ }
+        }
+    };
+
+    document.addEventListener('fullscreenchange', alCambiarFs);
+    document.addEventListener('webkitfullscreenchange', alCambiarFs);
+    if (el.video) {
+        el.video.addEventListener('webkitbeginfullscreen', () => {
+            setTimeout(liberarFocoPantallaCompleta, 30);
+        });
+        el.video.addEventListener('webkitendfullscreen', alCambiarFs);
+    }
+
+    const manejarTecla = (e) => {
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+        const esUno = e.key === '1' || e.code === 'Digit1' || e.code === 'Numpad1';
+        const esDos = e.key === '2' || e.code === 'Digit2' || e.code === 'Numpad2';
+        const esTres = e.key === '3' || e.code === 'Digit3' || e.code === 'Numpad3';
+        const esCuatro = e.key === '4' || e.code === 'Digit4' || e.code === 'Numpad4';
+        const esCinco = e.key === '5' || e.code === 'Digit5' || e.code === 'Numpad5';
+        const esSiete = e.key === '7' || e.code === 'Digit7' || e.code === 'Numpad7';
+        const esOcho = e.key === '8' || e.code === 'Digit8' || e.code === 'Numpad8';
+        const esNueve = e.key === '9' || e.code === 'Digit9' || e.code === 'Numpad9';
+        const esFlechaVertical = e.key === 'ArrowDown' || e.key === 'ArrowUp';
+        const esIzquierda = e.key === 'ArrowLeft';
+        const esDerecha = e.key === 'ArrowRight';
+
+        if (!esUno && !esDos && !esTres && !esCuatro && !esCinco && !esSiete && !esOcho && !esNueve && !esFlechaVertical && !esIzquierda && !esDerecha) {
+            return;
+        }
+
+        const enFs = estaEnPantallaCompleta();
+        const activo = document.activeElement;
+        if (!enFs && activo && (
+            activo.tagName === 'INPUT' ||
+            activo.tagName === 'TEXTAREA' ||
+            activo.tagName === 'SELECT' ||
+            activo.isContentEditable
+        )) {
+            return;
+        }
+
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') {
+            e.stopImmediatePropagation();
+        }
+        if (enFs) liberarFocoPantallaCompleta();
+
+        if (esUno) {
+            const canal = obtenerCanalActualEfectivo();
+            if (!canal) {
+                avisarSinCanal();
+                return;
+            }
+            alternarFavorito(canal, { abrirPanel: false });
+            return;
+        }
+
+        if (esDos) {
+            alternarModoRecorridoConTecla2();
+            return;
+        }
+
+        if (esTres) {
+            alternarMute();
+            return;
+        }
+
+        if (esCuatro) {
+            bajarVolumen();
+            return;
+        }
+
+        if (esCinco) {
+            subirVolumen();
+            return;
+        }
+
+        if (esSiete) {
+            alternarModoEstabilidadConTecla7();
+            return;
+        }
+
+        if (esOcho) {
+            ajustarColchonEstabilidad(-COLCHON_PASO_SEG);
+            return;
+        }
+
+        if (esNueve) {
+            ajustarColchonEstabilidad(COLCHON_PASO_SEG);
+            return;
+        }
+
+        if (esIzquierda) {
+            navegarCategoriaConFlecha('izquierda');
+            return;
+        }
+
+        if (esDerecha) {
+            navegarCategoriaConFlecha('derecha');
+            return;
+        }
+
+        const lista = obtenerListaRecorridoActiva();
+        if (!lista.length) return;
+
+        const actual = obtenerCanalActualEfectivo();
+        const idxActual = actual
+            ? lista.findIndex(c => Number(c.id) === Number(actual.id))
+            : -1;
+
+        let siguienteIdx;
+        if (idxActual === -1) {
+            siguienteIdx = e.key === 'ArrowDown' ? 0 : lista.length - 1;
+        } else if (e.key === 'ArrowDown') {
+            siguienteIdx = (idxActual + 1) % lista.length;
+        } else {
+            siguienteIdx = (idxActual - 1 + lista.length) % lista.length;
+        }
+
+        const destino = lista[siguienteIdx];
+        if (!destino) return;
+
+        reproducirCanal(destino);
+
+        if (modoRecorrido === 'favoritos') {
+            if (el.favPanel && el.favPanel.dataset.abierto === 'true' && el.favLista) {
+                const filaDest = filasFav.get(destino.id);
+                if (filaDest) {
+                    el.favLista.scrollTop = Math.max(0, filaDest.offsetTop - el.favLista.offsetTop - 8);
+                }
+            }
+        } else {
+            const cardDestino = asegurarTarjetaEnDOM(destino.id);
+            if (cardDestino) {
+                cardDestino.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+        }
+
+        if (enFs) {
+            mostrarAvisoPantallaCompleta(`▶ ${destino.nombre || 'Canal'}`);
+        }
+    };
+
+    window.addEventListener('keydown', manejarTecla, true);
+    document.addEventListener('keydown', manejarTecla, true);
+    if (el.video) {
+        el.video.addEventListener('keydown', manejarTecla, true);
+    }
+}
+
+/** Resuelve el canal activo incluso si se seleccionó desde la lista o el título. */
+function obtenerCanalActualEfectivo() {
+    if (canalActivo && canalActivo.url) return canalActivo;
+
+    const cardActiva = document.querySelector('.channel-card-tv.playing');
+    if (cardActiva) {
+        const c = canalPorId.get(Number(cardActiva.dataset.id));
+        if (c) {
+            canalActivo = c;
+            return c;
+        }
+    }
+
+    if (el.titulo) {
+        const limpio = el.titulo.textContent
+            .replace(/^▶\s*/, '')
+            .replace(/\s*\(fuente alternativa\)\s*$/i, '')
+            .trim();
+        if (limpio && limpio !== 'Selecciona un canal') {
+            const encontrado = todosLosCanales.find(c => (c.nombre || '').trim() === limpio);
+            if (encontrado) {
+                canalActivo = encontrado;
+                return encontrado;
+            }
+        }
+    }
+
+    return null;
+}
+
+function configurarBotonCorazonBarra() {
+    const botones = [el.btnCorazonBarra, el.btnCorazon].filter(Boolean);
+    botones.forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const canal = obtenerCanalActualEfectivo();
+            if (!canal) {
+                avisarSinCanal();
+                return;
+            }
+            alternarFavorito(canal, { abrirPanel: true });
+        });
+    });
+}
+
+/* ---------- Carga y filtrado de canales ---------- */
+async function cargarCanalesIniciales() {
+    try {
+        const respuesta = await fetch(`${API_URL}/canales`);
+        if (!respuesta.ok) throw new Error(`HTTP ${respuesta.status}`);
+
+        const datos = await respuesta.json();
+        todosLosCanales = Array.isArray(datos) ? datos : [];
+        canalPorId.clear();
+        canalPorUrl.clear();
+
+        todosLosCanales.forEach((c, idx) => {
+            if (!c || typeof c !== 'object') return;
+            if (c.id === undefined || c.id === null) c.id = idx + 1;
+            c.id = Number(c.id);
+            c._busqueda = normalizar(`${c.nombre || ''} ${c.categoria || ''} ${c.idioma || ''}`);
+            c._clave = claveCanal(c.nombre);
+            c._idioma = codigoIdioma(c.idioma);
+            canalPorId.set(c.id, c);
+            if (c.url) canalPorUrl.set(c.url, c);
+        });
+
+        canalesSeccion = todosLosCanales;
+        poblarDesplegableIdiomas();
+        aplicarFiltros();
+        renderizarFavoritos();
+        actualizarBotonCorazon();
+    } catch (error) {
+        console.error('Error cargando canales:', error);
+        mostrarMensajeLista('No se pudieron cargar los canales.', true);
+    }
+}
+
+function dispararInicioPrimerCanal() {
+    if (!inicioAutomaticoPendiente || canalActivo || !canalesVisibles.length) return;
+    const primerCanal = canalesVisibles.find(c => c && c.url) || canalesVisibles[0];
+    if (!primerCanal || !primerCanal.url) return;
+
+    inicioAutomaticoPendiente = false;
+    reproducirCanal(primerCanal);
+
+    // Respaldo de autoplay: si el navegador bloquea el inicio con audio, mutear y reproducir
+    if (el.video) {
+        const promesa = el.video.play();
+        if (promesa && typeof promesa.catch === 'function') {
+            promesa.catch((err) => {
+                if (err && err.name === 'NotAllowedError') {
+                    el.video.muted = true;
+                    el.video.play().catch(() => {});
+                }
+            });
+        }
+    }
+}
+
+function aplicarFiltros() {
+    let lista = canalesSeccion;
+    if (categoriaFiltro && categoriaFiltro !== 'TODO') {
+        lista = lista.filter(c => coincideCategoriaFiltro(c, categoriaFiltro));
+    }
+    if (idiomaFiltro && idiomaFiltro !== 'TODOS') {
+        lista = lista.filter(c => c._idioma === idiomaFiltro);
+    }
+    if (ocultarCaidos) lista = lista.filter(c => c.estado !== 'caido');
+    if (textoBusqueda) {
+        const q = normalizar(textoBusqueda);
+        lista = lista.filter(c => c._busqueda.includes(q));
+    }
+    lista = lista.slice().sort((a, b) => ORDEN_ESTADO[estadoDe(a)] - ORDEN_ESTADO[estadoDe(b)]);
+    canalesVisibles = lista;
+    renderizarGrilla(lista);
+    dispararInicioPrimerCanal();
+}
+
+/* ---------- Render progresivo de la lista ---------- */
+function mostrarMensajeLista(texto, conReintento) {
+    canalesVisibles = [];
+    indiceRenderizado = 0;
+    tarjetas.clear();
+    tarjetaActiva = null;
+    if (!el.grilla) return;
+    el.grilla.textContent = '';
+    const caja = document.createElement('div');
+    caja.className = 'lista-mensaje';
+    caja.textContent = texto;
+    if (conReintento) {
+        const btn = document.createElement('button');
+        btn.className = 'btn-secundario';
+        btn.textContent = 'Reintentar';
+        btn.addEventListener('click', cargarCanalesIniciales);
+        caja.appendChild(btn);
+    }
+    el.grilla.appendChild(caja);
+    if (el.stats) el.stats.textContent = '';
+}
+
+function renderizarSiguienteLote(cantidad) {
+    if (!el.grilla || indiceRenderizado >= canalesVisibles.length) return;
+    const hasta = Math.min(indiceRenderizado + cantidad, canalesVisibles.length);
+    const fragmento = document.createDocumentFragment();
+
+    for (let i = indiceRenderizado; i < hasta; i++) {
+        const canal = canalesVisibles[i];
+        try {
+            const card = crearTarjeta(canal);
+            if (canalActivo && Number(canal.id) === Number(canalActivo.id)) {
+                tarjetaActiva = card;
+                card.classList.add('playing');
+            }
+            fragmento.appendChild(card);
+        } catch (e) {
+            console.warn('Error al crear tarjeta de canal:', canal, e);
+        }
+    }
+
+    el.grilla.appendChild(fragmento);
+    indiceRenderizado = hasta;
+}
+
+function renderizarGrilla(canales) {
+    tarjetas.clear();
+    tarjetaActiva = null;
+    indiceRenderizado = 0;
+    if (!el.grilla) return;
+    el.grilla.textContent = '';
+    el.grilla.scrollTop = 0;
+
+    if (!canales.length) {
+        mostrarMensajeLista('No hay canales para mostrar.', false);
+        return;
+    }
+
+    renderizarSiguienteLote(LOTE_INICIAL_CANALES);
+
+    const caidos = canales.filter(c => c.estado === 'caido').length;
+    const enLinea = canales.filter(c => c.estado === 'ok').length;
+    if (el.stats) {
+        el.stats.textContent = `${canales.length} canales · ${enLinea} en línea · ${caidos} caídos`;
+    }
+}
+
+function crearTarjeta(canal, { favorito = false } = {}) {
+    const card = document.createElement('div');
+    card.className = 'channel-card-tv';
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.dataset.id = canal.id;
+
+    const thumb = document.createElement('div');
+    thumb.className = 'channel-thumb-tv';
+    const ponerIcono = () => { thumb.textContent = '📺'; };
+    if (canal.logo && /^https?:\/\//i.test(canal.logo)) {
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.alt = '';
+        img.referrerPolicy = 'no-referrer';
+        img.addEventListener('error', ponerIcono);
+        img.src = canal.logo;
+        thumb.appendChild(img);
+    } else {
+        ponerIcono();
+    }
+
+    const info = document.createElement('div');
+    info.className = 'channel-info-tv';
+    const nombre = document.createElement('h4');
+    nombre.textContent = canal.nombre || 'Canal';
+    const sub = document.createElement('span');
+    sub.className = 'channel-estado-texto';
+    info.appendChild(nombre);
+    info.appendChild(sub);
+
+    const punto = document.createElement('span');
+    punto.className = 'estado-dot';
+
+    card.appendChild(thumb);
+    card.appendChild(info);
+    card.appendChild(punto);
+
+    if (favorito) {
+        card.classList.add('fav-item');
+        const quitar = document.createElement('button');
+        quitar.type = 'button';
+        quitar.className = 'fav-quitar';
+        quitar.textContent = '✕';
+        quitar.title = 'Quitar de favoritos';
+        quitar.setAttribute('aria-label', `Quitar ${canal.nombre || 'canal'} de favoritos`);
+        quitar.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            quitarFavorito(canal);
+        });
+        card.appendChild(quitar);
+    }
+
+    pintarEstado(card, canal);
+
+    const abrir = () => reproducirCanal(canal);
+    card.addEventListener('click', abrir);
+    card.addEventListener('keydown', (e) => {
+        if (e.target !== card) return;
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); abrir(); }
+    });
+
+    (favorito ? filasFav : tarjetas).set(canal.id, card);
+    return card;
+}
+
+function pintarEstado(card, canal) {
+    const estado = estadoDe(canal);
+    card.classList.remove('estado-ok', 'estado-caido', 'estado-desconocido');
+    card.classList.add(`estado-${estado}`);
+    const texto = ESTADO_TEXTO[estado];
+    const dot = card.querySelector('.estado-dot');
+    const sub = card.querySelector('.channel-estado-texto');
+    if (dot) dot.title = texto;
+    if (sub) sub.textContent = estado === 'ok' ? '' : texto;
+    card.setAttribute('aria-label', `${canal.nombre || 'Canal'}, ${texto}`);
+}
+
+function actualizarEstadoCanal(id, estado) {
+    const canal = canalPorId.get(id);
+    if (!canal || !estado) return;
+    canal.estado = estado;
+    const card = tarjetas.get(id);
+    if (card) pintarEstado(card, canal);
+    const fila = filasFav.get(id);
+    if (fila) pintarEstado(fila, canal);
+}
+
+function marcarTarjetaActiva() {
+    if (tarjetaActiva) tarjetaActiva.classList.remove('playing');
+    tarjetaActiva = canalActivo ? tarjetas.get(canalActivo.id) || null : null;
+    if (tarjetaActiva) tarjetaActiva.classList.add('playing');
+    marcarFilaFavActiva();
+}
+
+function marcarFilaFavActiva() {
+    if (filaFavActiva) filaFavActiva.classList.remove('playing');
+    filaFavActiva = canalActivo ? filasFav.get(canalActivo.id) || null : null;
+    if (filaFavActiva) filaFavActiva.classList.add('playing');
+}
+
+/* =====================================================================
+   CUENTA DE USUARIO (LOGIN CON GOOGLE, MICROSOFT, GITHUB, DISCORD)
+- Sin sesión: se puede ver y reproducir todo, pero la barra de favoritos queda oculta.
+- Con sesión: aparecen los favoritos guardados en la cuenta.
+   ===================================================================== */
+const NOMBRES_PROVEEDOR = { google: 'Google', microsoft: 'Microsoft', github: 'GitHub', discord: 'Discord' };
+const MENSAJES_LOGIN = {
+    cancelado: 'inicio de sesión cancelado',
+    error: 'no se pudo iniciar sesión · probá de nuevo',
+    no_configurado: 'ese método de acceso todavía no está disponible',
+};
+// Íconos fijos (no contienen datos de usuarios)
+const ICONOS_PROVEEDOR = {
+    google: '<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>',
+    microsoft: '<svg viewBox="0 0 23 23" aria-hidden="true"><path fill="#f25022" d="M1 1h10v10H1z"/><path fill="#7fba00" d="M12 1h10v10H12z"/><path fill="#00a4ef" d="M1 12h10v10H1z"/><path fill="#ffb900" d="M12 12h10v10H12z"/></svg>',
+    github: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>',
+    discord: '<span aria-hidden="true">🎮</span>',
+};
+let proveedoresCache = null;
+
+function apiFetch(url, opciones = {}) {
+    return fetch(url, {
+        credentials: 'same-origin',
+        ...opciones,
+        headers: { 'X-Requested-With': 'fetch', ...(opciones.headers || {}) },
+    });
+}
+
+function configurarSesionUI() {
+    el.btnLogin = document.getElementById('btn-login');
+    el.userCard = document.getElementById('user-card');
+    el.userAvatar = document.getElementById('user-avatar');
+    el.userInicial = document.getElementById('user-inicial');
+    el.userNombre = document.getElementById('user-nombre');
+    el.userProveedor = document.getElementById('user-proveedor');
+    el.btnSalir = document.getElementById('btn-salir');
+    el.loginDialog = document.getElementById('login-dialog');
+    el.loginProveedores = document.getElementById('login-proveedores');
+    el.loginCerrar = document.getElementById('login-cerrar');
+
+    if (el.btnLogin) el.btnLogin.addEventListener('click', abrirLogin);
+    if (el.btnSalir) el.btnSalir.addEventListener('click', cerrarSesion);
+    if (el.loginCerrar) el.loginCerrar.addEventListener('click', cerrarLogin);
+    if (el.loginDialog) {
+        el.loginDialog.addEventListener('click', (e) => {
+            if (e.target === el.loginDialog) cerrarLogin();   // clic en el fondo oscuro
+        });
+    }
+    if (el.userAvatar) {
+        el.userAvatar.addEventListener('error', () => {
+            el.userAvatar.hidden = true;
+            if (el.userInicial) el.userInicial.hidden = false;
+        });
+    }
+
+    // Al volver a la pestaña se refrescan los favoritos (por si cambiaron en otro dispositivo)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && usuario &&
+            Date.now() - ultimaSincronizacionFav > 30000) {
+            cargarFavoritosServidor();
+        }
+    });
+
+    manejarResultadoLoginEnURL();
+}
+
+function manejarResultadoLoginEnURL() {
+    const params = new URLSearchParams(location.search);
+    const resultado = params.get('login');
+    if (!resultado) return;
+    params.delete('login');
+    const resto = params.toString();
+    history.replaceState(null, '', location.pathname + (resto ? `?${resto}` : '') + location.hash);
+    if (MENSAJES_LOGIN[resultado]) mostrarAvisoTransitorio(MENSAJES_LOGIN[resultado], 4000);
+}
+
+async function cargarSesion() {
+    try {
+        const r = await apiFetch(`${API_URL}/auth/yo`);
+        const datos = r.ok ? await r.json() : { usuario: null };
+        usuario = datos.usuario || null;
+    } catch (e) {
+        usuario = null;
+    }
+    aplicarEstadoSesion();
+    document.body.classList.add('sesion-lista');
+    if (usuario) await cargarFavoritosServidor({ migrar: true });
+}
+
+function aplicarEstadoSesion() {
+    document.body.classList.toggle('con-sesion', Boolean(usuario));
+    if (el.btnLogin) el.btnLogin.hidden = Boolean(usuario);
+    if (el.userCard) el.userCard.hidden = !usuario;
+
+    if (usuario) {
+        const nombre = usuario.nombre || 'Usuario';
+        if (el.userNombre) el.userNombre.textContent = nombre;
+        if (el.userProveedor) {
+            el.userProveedor.textContent = `Cuenta de ${NOMBRES_PROVEEDOR[usuario.proveedor] || usuario.proveedor}`;
+        }
+        if (el.userInicial) {
+            el.userInicial.textContent = nombre.trim().charAt(0).toUpperCase() || '?';
+        }
+        const tieneAvatar = Boolean(usuario.avatar);
+        if (el.userAvatar) {
+            el.userAvatar.hidden = !tieneAvatar;
+            if (tieneAvatar) el.userAvatar.src = usuario.avatar;
+        }
+        if (el.userInicial) el.userInicial.hidden = tieneAvatar;
+    } else {
+        favoritos = [];
+        modoRecorrido = 'principal';
+        alternarPanelFavoritos(false);
+    }
+    renderizarFavoritos();
+    actualizarBotonCorazon();
+}
+
+async function cargarFavoritosServidor({ migrar = false } = {}) {
+    if (!usuario) return;
+    try {
+        const r = await apiFetch(`${API_URL}/favoritos`);
+        if (r.status === 401) { sesionExpirada(); return; }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const datos = await r.json();
+        favoritos = Array.isArray(datos.urls) ? datos.urls : [];
+
+        // Una sola vez: pasa a la cuenta los favoritos que el navegador tenía guardados antes del login
+        const locales = migrar ? leerFavoritosLocales() : [];
+        if (locales.length) {
+            const r2 = await apiFetch(`${API_URL}/favoritos/importar`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ urls: locales }),
+            });
+            if (r2.ok) {
+                const d2 = await r2.json();
+                if (Array.isArray(d2.urls)) favoritos = d2.urls;
+                try { localStorage.removeItem(STORAGE_FAVORITOS); } catch (e) { /* sin acceso */ }
+            }
+        }
+        ultimaSincronizacionFav = Date.now();
+    } catch (e) {
+        console.warn('No se pudieron cargar los favoritos:', e);
+    }
+    renderizarFavoritos();
+    actualizarBotonCorazon();
+}
+
+function sesionExpirada() {
+    usuario = null;
+    aplicarEstadoSesion();
+    mostrarAvisoTransitorio('tu sesión expiró · iniciá sesión de nuevo', 4000);
+}
+
+async function cerrarSesion() {
+    try {
+        const r = await apiFetch(`${API_URL}/auth/salir`, { method: 'POST' });
+        if (!r.ok && r.status !== 401) throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+        mostrarAvisoTransitorio('no se pudo cerrar la sesión · probá de nuevo');
+        return;
+    }
+    usuario = null;
+    aplicarEstadoSesion();
+    mostrarAvisoTransitorio('sesión cerrada');
+}
+
+/* ---------- Ventana de inicio de sesión ---------- */
+function mostrarTextoLogin(texto) {
+    if (!el.loginProveedores) return;
+    el.loginProveedores.textContent = '';
+    const p = document.createElement('p');
+    p.className = 'login-vacio';
+    p.textContent = texto;
+    el.loginProveedores.appendChild(p);
+}
+
+async function abrirLogin() {
+    if (!el.loginDialog) return;
+    if (!el.loginDialog.open) {
+        if (typeof el.loginDialog.showModal === 'function') el.loginDialog.showModal();
+        else el.loginDialog.setAttribute('open', '');
+    }
+    if (proveedoresCache === null) {
+        mostrarTextoLogin('Cargando…');
+        try {
+            const r = await apiFetch(`${API_URL}/auth/proveedores`);
+            const d = await r.json();
+            proveedoresCache = Array.isArray(d.proveedores) ? d.proveedores : [];
+        } catch (e) {
+            mostrarTextoLogin('No se pudo conectar con el servidor. Probá de nuevo en un momento.');
+            return;
+        }
+    }
+    renderizarProveedores();
+}
+
+function cerrarLogin() {
+    if (!el.loginDialog) return;
+    if (typeof el.loginDialog.close === 'function') el.loginDialog.close();
+    else el.loginDialog.removeAttribute('open');
+}
+
+function renderizarProveedores() {
+    if (!el.loginProveedores) return;
+    if (!proveedoresCache || !proveedoresCache.length) {
+        mostrarTextoLogin('Todavía no hay métodos de acceso configurados en el servidor.');
+        return;
+    }
+    el.loginProveedores.textContent = '';
+    proveedoresCache.forEach(({ id, nombre }) => {
+        const enlace = document.createElement('a');
+        enlace.className = 'btn-prov';
+        enlace.href = `/auth/login/${encodeURIComponent(id)}`;
+
+        const icono = document.createElement('span');
+        icono.className = 'btn-prov-icono';
+        icono.innerHTML = ICONOS_PROVEEDOR[id] || '<span aria-hidden="true">🔑</span>';
+
+        const texto = document.createElement('span');
+        texto.textContent = `Continuar con ${nombre}`;
+
+        enlace.appendChild(icono);
+        enlace.appendChild(texto);
+        el.loginProveedores.appendChild(enlace);
+    });
+}
+
+/* =====================================================================
+   FAVORITOS (CORAZÓN JUNTO A LA BARRA DE FAVORITOS, GUARDADOS EN LA CUENTA)
+   ===================================================================== */
+/** Favoritos que versiones anteriores guardaban en el navegador (solo se usan para migrarlos a la cuenta). */
+function leerFavoritosLocales() {
+    try {
+        const datos = JSON.parse(leerPref(STORAGE_FAVORITOS) || '[]');
+        return Array.isArray(datos) ? datos.filter(u => typeof u === 'string' && u.trim().length > 0) : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function esFavorito(canal) {
+    return Boolean(canal && canal.url && favoritos.includes(canal.url));
+}
+
+function mostrarAvisoFavorito(texto, duracionMs = 3500) {
+    if (!el.favAviso) return;
+    el.favAviso.textContent = texto;
+    el.favAviso.hidden = false;
+    el.favAviso.style.display = 'block';
+    clearTimeout(timerAviso);
+    timerAviso = setTimeout(() => {
+        el.favAviso.hidden = true;
+        el.favAviso.style.display = '';
+    }, duracionMs);
+}
+
+function alternarFavorito(canal, { abrirPanel = true } = {}) {
+    if (!usuario) {
+        mostrarAvisoTransitorio('iniciá sesión para guardar favoritos');
+        return;
+    }
+    if (!canal || !canal.url) {
+        mostrarAvisoFavorito('Este canal no tiene una URL válida para guardar en favoritos.');
+        return;
+    }
+
+    const url = canal.url;
+    const i = favoritos.indexOf(url);
+    const agregado = i === -1;
+    if (agregado) favoritos.push(url);
+    else favoritos.splice(i, 1);
+
+    actualizarBotonCorazon();
+    renderizarFavoritos();
+
+    if (modoRecorrido === 'favoritos' && !obtenerCanalesFavoritosDisponibles().length) {
+        modoRecorrido = 'principal';
+    }
+
+    if (agregado) {
+        animarCorazon(el.btnCorazonBarra, true);
+        animarCorazon(el.btnCorazon, true);
+        if (abrirPanel && el.favPanel && el.favPanel.dataset.abierto !== 'true') {
+            alternarPanelFavoritos(true);
+        }
+        mostrarAvisoTransitorio('agregado a favoritos');
+    } else {
+        mostrarAvisoTransitorio('eliminado de favoritos');
+    }
+
+    sincronizarFavorito(url, agregado);
+}
+
+/** Guarda el cambio en el servidor; si falla, deshace el cambio en pantalla. */
+async function sincronizarFavorito(url, agregado) {
+    try {
+        const r = agregado
+            ? await apiFetch(`${API_URL}/favoritos`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            })
+            : await apiFetch(`${API_URL}/favoritos?url=${encodeURIComponent(url)}`, { method: 'DELETE' });
+        if (r.status === 401) { sesionExpirada(); return; }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    } catch (e) {
+        const i = favoritos.indexOf(url);
+        if (agregado && i !== -1) favoritos.splice(i, 1);
+        if (!agregado && i === -1) favoritos.push(url);
+        actualizarBotonCorazon();
+        renderizarFavoritos();
+        mostrarAvisoFavorito('No se pudo guardar el cambio. Revisá tu conexión e intentá de nuevo.');
+    }
+}
+
+function quitarFavorito(canal) {
+    if (!canal || !canal.url) return;
+    alternarFavorito(canal, { abrirPanel: false });
+}
+
+function aplicarColorCorazon(boton, fav) {
+    if (!boton) return;
+    boton.style.color = fav ? '#ef4444' : '#cbd5e1';
+    const path = boton.querySelector('path');
+    if (path) {
+        path.style.fill = fav ? '#ef4444' : 'transparent';
+        path.style.stroke = fav ? '#ef4444' : '#cbd5e1';
+        path.style.strokeWidth = '2.2';
+    }
+}
+
+function actualizarBotonCorazon() {
+    const canalRef = obtenerCanalActualEfectivo();
+    const fav = canalRef ? esFavorito(canalRef) : false;
+    const texto = fav ? 'Quitar de favoritos' : 'Agregar a favoritos';
+
+    if (el.btnCorazon) {
+        el.btnCorazon.hidden = !canalRef;
+        el.btnCorazon.classList.toggle('activo', fav);
+        el.btnCorazon.setAttribute('aria-pressed', fav ? 'true' : 'false');
+        el.btnCorazon.setAttribute('aria-label', texto);
+        el.btnCorazon.title = texto;
+        aplicarColorCorazon(el.btnCorazon, fav);
+    }
+
+    if (el.btnCorazonBarra) {
+        el.btnCorazonBarra.classList.toggle('sin-canal', !canalRef);
+        el.btnCorazonBarra.classList.toggle('activo', fav);
+        el.btnCorazonBarra.setAttribute('aria-pressed', fav ? 'true' : 'false');
+        el.btnCorazonBarra.setAttribute('aria-label', texto);
+        el.btnCorazonBarra.title = canalRef ? texto : 'Agregar a favoritos (elegí un canal primero)';
+        aplicarColorCorazon(el.btnCorazonBarra, fav);
+    }
+}
+
+function avisarSinCanal() {
+    const b = el.btnCorazonBarra;
+    if (b) {
+        b.classList.remove('sacudir');
+        void b.offsetWidth;
+        b.classList.add('sacudir');
+    }
+    mostrarAvisoTransitorio('Primero elegí un canal de la lista para poder agregarlo a favoritos.');
+}
+
+function animarCorazon(b, particulas = true) {
+    if (!b) return;
+    b.classList.remove('latido');
+    void b.offsetWidth;
+    b.classList.add('latido');
+    if (!particulas) return;
+
+    const total = 6;
+    for (let i = 0; i < total; i++) {
+        const mini = document.createElement('span');
+        mini.className = 'mini-corazon';
+        mini.textContent = '♥';
+        const angulo = (Math.PI * 2 * i) / total + Math.random() * 0.5;
+        const distancia = 26 + Math.random() * 12;
+        mini.style.setProperty('--dx', `${Math.cos(angulo) * distancia}px`);
+        mini.style.setProperty('--dy', `${Math.sin(angulo) * distancia}px`);
+        mini.addEventListener('animationend', () => mini.remove());
+        b.appendChild(mini);
+    }
+}
+
+function alternarPanelFavoritos(forzarEstado) {
+    if (!el.favPanel || !el.btnFavoritos) return;
+    const abrir = typeof forzarEstado === 'boolean'
+        ? forzarEstado
+        : el.favPanel.dataset.abierto !== 'true';
+    el.favPanel.dataset.abierto = abrir ? 'true' : 'false';
+    el.favPanel.inert = !abrir;
+    el.btnFavoritos.setAttribute('aria-expanded', abrir ? 'true' : 'false');
+}
+
+function renderizarFavoritos() {
+    if (!el.favLista) return;
+    filasFav.clear();
+    filaFavActiva = null;
+    el.favLista.textContent = '';
+
+    const canales = favoritos.slice().reverse().map(u => canalPorUrl.get(u)).filter(Boolean);
+    const cargando = canalPorUrl.size === 0 && favoritos.length > 0;
+    if (el.favCount) {
+        el.favCount.textContent = cargando ? favoritos.length : canales.length;
+    }
+
+    if (!canales.length) {
+        const vacio = document.createElement('div');
+        vacio.className = 'favoritos-vacio';
+        vacio.textContent = cargando
+            ? 'Cargando favoritos…'
+            : 'Todavía no tenés favoritos. Tocá el corazón al lado de Favoritos para guardar el canal actual.';
+        el.favLista.appendChild(vacio);
+        return;
+    }
+
+    const fragmento = document.createDocumentFragment();
+    canales.forEach(canal => fragmento.appendChild(crearTarjeta(canal, { favorito: true })));
+    el.favLista.appendChild(fragmento);
+    marcarFilaFavActiva();
+}
+
+/* =====================================================================
+   REPRODUCTOR
+   ===================================================================== */
+function tipoDeUrl(url) {
+    if (/m3u8/i.test(url)) return 'hls';
+    if (/\.(mp4|webm|ogv|ogg|mp3|aac|m4a)(\?|#|$)/i.test(url)) return 'directo';
+    return 'auto';
+}
+
+function mostrarOverlay(tipo, texto) {
+    if (!el.overlay || !el.msg) return;
+    clearTimeout(player.timerSpinner);
+    el.overlay.hidden = false;
+    el.overlay.dataset.tipo = tipo;
+    if (el.spinner) el.spinner.hidden = tipo !== 'cargando';
+    if (el.acciones) el.acciones.hidden = tipo !== 'error';
+    el.msg.textContent = texto;
+}
+
+function ocultarOverlay() {
+    if (!el.overlay) return;
+    clearTimeout(player.timerSpinner);
+    el.overlay.hidden = true;
+}
+
+function armarWatchdog(ms) {
+    clearTimeout(player.watchdog);
+    player.watchdog = setTimeout(() => programarReintento('sin datos'), ms);
+}
+
+function desarmarWatchdog() {
+    clearTimeout(player.watchdog);
+    player.watchdog = null;
+}
+
+function limpiarMotor() {
+    player.sesion++;
+    detenerEsperaColchon();
+    clearTimeout(player.timerReintento);
+    clearTimeout(player.watchdog);
+    clearTimeout(player.timerEstable);
+    clearTimeout(player.timerSpinner);
+    if (player.hls) {
+        try { player.hls.destroy(); } catch (e) { /* ya destruido */ }
+        player.hls = null;
+    }
+    player.modo = null;
+    const v = el.video;
+    if (v) {
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+    }
+}
+
+function reproducirCanal(canal, { automatico = false, manual = false } = {}) {
+    if (!canal || !canal.url) return;
+    inicioAutomaticoPendiente = false;
+    if (el.favAviso) {
+        el.favAviso.hidden = true;
+        el.favAviso.style.display = '';
+    }
+    if (!automatico && !manual) player.fuentesProbadas.clear();
+    player.fuentesProbadas.add(canal.id);
+
+    canalActivo = canal;
+    player.intento = 0;
+    player.recuperacionesMedia = 0;
+    player.forzarDirecto = false;
+    player.esperandoRed = false;
+
+    if (el.titulo) {
+        el.titulo.textContent = `▶ ${canal.nombre}${automatico ? ' (fuente alternativa)' : ''}`;
+    }
+    asegurarTarjetaEnDOM(canal.id);
+    marcarTarjetaActiva();
+    actualizarBotonCorazon();
+    iniciarReproduccion();
+}
+
+function iniciarReproduccion() {
+    const canal = canalActivo;
+    if (!canal || !canal.url || !el.video) return;
+
+    limpiarMotor();
+    const sesion = player.sesion;
+    const video = el.video;
+    const tipo = tipoDeUrl(canal.url);
+    const conColchon = player.modoColchon;
+    const bufferObjetivo = conColchon ? Math.max(45, colchonObjetivoSeg + 15) : 30;
+
+    mostrarOverlay('cargando', player.intento
+        ? `Reconectando… intento ${player.intento} de ${MAX_REINTENTOS}`
+        : (conColchon ? `Acumulando colchón de estabilidad… 0s / ${colchonObjetivoSeg}s` : 'Cargando canal…'));
+    armarWatchdog(TIMEOUT_ARRANQUE_MS);
+
+    const usarHlsJs = tipo !== 'directo' && !player.forzarDirecto && window.Hls && Hls.isSupported();
+
+    if (usarHlsJs) {
+        player.modo = 'hls';
+        const hls = new Hls({
+            enableWorker: true,
+            manifestLoadingTimeOut: 10000,
+            manifestLoadingMaxRetry: 2,
+            levelLoadingTimeOut: 10000,
+            levelLoadingMaxRetry: 3,
+            fragLoadingTimeOut: 20000,
+            fragLoadingMaxRetry: 4,
+            maxBufferLength: bufferObjetivo,
+            maxMaxBufferLength: bufferObjetivo + 20,
+            backBufferLength: 30,
+        });
+        player.hls = hls;
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            if (sesion !== player.sesion) return;
+            if (player.modoColchon) {
+                iniciarEsperaColchon('Acumulando colchón de estabilidad');
+            } else {
+                intentarPlay();
+            }
+        });
+        hls.on(Hls.Events.ERROR, (_evt, data) => manejarErrorHls(data, sesion, tipo === 'auto'));
+        hls.attachMedia(video);
+        hls.loadSource(canal.url);
+    } else {
+        player.modo = 'nativo';
+        video.src = canal.url;
+        video.load();
+        if (player.modoColchon) {
+            iniciarEsperaColchon('Acumulando colchón de estabilidad');
+        } else {
+            intentarPlay();
+        }
+    }
+}
+
+function intentarPlay() {
+    if (!el.video) return;
+    const p = el.video.play();
+    if (p && p.catch) {
+        p.catch(err => {
+            if (err && err.name === 'NotAllowedError') {
+                desarmarWatchdog();
+                mostrarOverlay('info', 'Tocá ▶ para empezar a reproducir.');
+            }
+        });
+    }
+}
+
+function manejarErrorHls(data, sesion, esAuto) {
+    if (sesion !== player.sesion || !data || !data.fatal) return;
+    const { ErrorTypes, ErrorDetails } = Hls;
+
+    if (esAuto && !player.forzarDirecto && data.details === ErrorDetails.MANIFEST_PARSING_ERROR) {
+        player.forzarDirecto = true;
+        iniciarReproduccion();
+        return;
+    }
+
+    if (data.type === ErrorTypes.MEDIA_ERROR && player.recuperacionesMedia < MAX_RECUPERACIONES_MEDIA) {
+        player.recuperacionesMedia++;
+        if (player.recuperacionesMedia === 2 && player.hls) player.hls.swapAudioCodec();
+        if (player.hls) player.hls.recoverMediaError();
+        mostrarOverlay('cargando', 'Recuperando la reproducción…');
+        armarWatchdog(TIMEOUT_CORTE_MS);
+        return;
+    }
+
+    programarReintento(data.details || data.type);
+}
+
+function programarReintento(motivo) {
+    if (!canalActivo) return;
+    limpiarMotor();
+    console.warn('Reintento por:', motivo);
+
+    if (!navigator.onLine) {
+        player.esperandoRed = true;
+        mostrarOverlay('error', 'Sin conexión a internet. Se reanudará cuando vuelva la red.');
+        return;
+    }
+    if (player.intento >= MAX_REINTENTOS) {
+        falloDefinitivo();
+        return;
+    }
+
+    const espera = BACKOFF_MS[player.intento];
+    player.intento++;
+    mostrarOverlay('cargando', `Reconectando… intento ${player.intento} de ${MAX_REINTENTOS}`);
+    player.timerReintento = setTimeout(iniciarReproduccion, espera);
+}
+
+function buscarAlternativa(canal) {
+    if (!canal._clave) return null;
+    return todosLosCanales.find(c =>
+        c.id !== canal.id &&
+        c._clave === canal._clave &&
+        c.estado !== 'caido' &&
+        !player.fuentesProbadas.has(c.id)
+    ) || null;
+}
+
+async function verificarEnServidor(id) {
+    try {
+        const r = await fetch(`${API_URL}/canales/${id}/verificar`, { method: 'POST' });
+        if (!r.ok) return null;
+        return await r.json();
+    } catch (e) {
+        return null;
+    }
+}
+
+async function falloDefinitivo() {
+    const canal = canalActivo;
+    if (!canal) return;
+    const sesion = player.sesion;
+
+    const alternativa = buscarAlternativa(canal);
+    if (alternativa) {
+        mostrarOverlay('cargando', `No responde. Probando otra fuente de ${canal.nombre}…`);
+        verificarEnServidor(canal.id).then(r => r && actualizarEstadoCanal(canal.id, r.estado));
+        player.timerReintento = setTimeout(() => {
+            if (sesion === player.sesion) reproducirCanal(alternativa, { automatico: true });
+        }, 900);
+        return;
+    }
+
+    mostrarOverlay('error', 'No se pudo reproducir este canal. Verificando…');
+    const res = await verificarEnServidor(canal.id);
+    if (sesion !== player.sesion || canalActivo !== canal) return;
+
+    if (res) actualizarEstadoCanal(canal.id, res.estado);
+    let texto = 'No se pudo reproducir este canal.';
+    if (res && res.estado === 'caido') {
+        texto = 'Canal caído: tampoco responde desde el servidor.';
+    } else if (res && res.estado === 'ok') {
+        texto = 'El servidor ve el canal activo, pero tu navegador no pudo reproducirlo ' +
+                '(formato no compatible, CORS o stream http en una página https).';
+    }
+    mostrarOverlay('error', texto);
+}
+
+function configurarEventosVideo() {
+    const v = el.video;
+    if (!v) return;
+
+    v.addEventListener('playing', () => {
+        if (!player.modo) return;
+        desarmarWatchdog();
+        ocultarOverlay();
+        clearTimeout(player.timerEstable);
+        player.timerEstable = setTimeout(() => {
+            player.intento = 0;
+            player.recuperacionesMedia = 0;
+        }, ESTABLE_TRAS_MS);
+    });
+
+    v.addEventListener('waiting', () => {
+        if (!player.modo || v.paused || player.esperandoColchon) return;
+        clearTimeout(player.timerEstable);
+        clearTimeout(player.timerSpinner);
+        player.timerSpinner = setTimeout(() => mostrarOverlay('cargando', 'Cargando…'), 500);
+        armarWatchdog(TIMEOUT_CORTE_MS);
+    });
+
+    v.addEventListener('ended', () => {
+        if (player.modo) programarReintento('fin de transmisión');
+    });
+
+    v.addEventListener('error', () => {
+        if (player.modo === 'nativo') programarReintento('error de video');
+    });
+}
